@@ -164,7 +164,8 @@ fn (mut c Checker) struct_decl(mut node ast.StructDecl) {
 			if field.has_default_expr {
 				c.expected_type = field.typ
 				field.default_expr_typ = c.expr(mut field.default_expr)
-				if field.typ.is_ptr() != field.default_expr_typ.is_ptr() {
+				if field.typ.is_ptr() != field.default_expr_typ.is_ptr()
+					&& field.default_expr_typ.idx() !in ast.pointer_type_idxs {
 					default_pos := field.default_expr.pos()
 					if field.default_expr is ast.CallExpr {
 						err_desc := if field.typ.is_ptr() { 'is' } else { 'is not' }
