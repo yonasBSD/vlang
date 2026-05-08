@@ -15,6 +15,8 @@ const skip_files = [
 const skip_on_cstrict = [
 	'vlib/v/checker/tests/missing_c_lib_header_1.vv',
 	'vlib/v/checker/tests/missing_c_lib_header_with_explanation_2.vv',
+	'vlib/v/checker/tests/comptime_value_d_in_include_errors.vv',
+	'vlib/v/checker/tests/missing_shader_header_1.vv',
 ]
 
 const skip_on_ubuntu_musl = [
