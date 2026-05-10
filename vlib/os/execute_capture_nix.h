@@ -1,5 +1,3 @@
-#include <pthread.h>
-
 // v_os_execute_set_cloexec marks an fd as close-on-exec. When multiple threads
 // each call os.execute, every pipe() they create is briefly visible to all of
 // them; without FD_CLOEXEC, one thread's spawned child can inherit another
@@ -15,20 +13,11 @@ static void v_os_execute_set_cloexec(int fd) {
 	}
 }
 
-// v_os_execute_mutex serializes pipe()+spawn from os.execute(). On macOS arm64
-// GitHub Actions runners, two threads racing through pipe()+posix_spawn caused
-// captured output to come back empty (the reader saw EOF immediately even
-// though posix_spawn returned success). Even with FD_CLOEXEC on the pipe ends,
-// the test consistently failed with all empty outputs. Serializing the
-// pipe+spawn region keeps the helper thread-safe at the cost of preventing two
-// concurrent execute() calls, which is acceptable for a child-process spawn.
-static pthread_mutex_t v_os_execute_mutex = PTHREAD_MUTEX_INITIALIZER;
-
 #if defined(__ANDROID__) && (!defined(__ANDROID_API__) || __ANDROID_API__ < 28)
 // Android API levels below 28 do not provide posix_spawn(). Fall back to
 // fork()/execvp() with a pipe; this is what popen() does internally and
 // is sufficient for capturing the merged stdout+stderr of a shell command.
-static int v_os_execute_capture_start_unlocked(const char *cmd, int *child_pid, int *read_fd) {
+static int v_os_execute_capture_start(const char *cmd, int *child_pid, int *read_fd) {
 	int pipefd[2];
 	if (pipe(pipefd) != 0) {
 		return -1;
@@ -74,7 +63,7 @@ int posix_spawn_file_actions_addclose(posix_spawn_file_actions_t *, int);
 
 extern char **environ;
 
-static int v_os_execute_capture_start_unlocked(const char *cmd, int *child_pid, int *read_fd) {
+static int v_os_execute_capture_start(const char *cmd, int *child_pid, int *read_fd) {
 	int pipefd[2];
 	if (pipe(pipefd) != 0) {
 		return -1;
@@ -110,10 +99,3 @@ static int v_os_execute_capture_start_unlocked(const char *cmd, int *child_pid, 
 	return 0;
 }
 #endif
-
-static int v_os_execute_capture_start(const char *cmd, int *child_pid, int *read_fd) {
-	pthread_mutex_lock(&v_os_execute_mutex);
-	int rc = v_os_execute_capture_start_unlocked(cmd, child_pid, read_fd);
-	pthread_mutex_unlock(&v_os_execute_mutex);
-	return rc;
-}
