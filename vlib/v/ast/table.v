@@ -1158,8 +1158,10 @@ fn (mut t Table) rewrite_already_registered_symbol(typ TypeSymbol, existing_idx 
 		return existing_idx
 	}
 	// Allow C type aliases to override existing C types (e.g. `type C.WCHAR = u16`
-	// on Windows where WCHAR is already registered from system headers):
-	if typ.kind == .alias && typ.language == .c && existing_symbol.language == .c {
+	// on Windows where WCHAR is already registered from system headers).
+	// Detect C aliases by the `C.` name prefix, since alias TypeSymbols
+	// themselves don't carry .language == .c (only Alias.info.language does):
+	if typ.kind == .alias && typ.name.starts_with('C.') && existing_symbol.name.starts_with('C.') {
 		t.type_symbols[existing_idx] = &TypeSymbol{
 			...typ
 			idx:        existing_idx
