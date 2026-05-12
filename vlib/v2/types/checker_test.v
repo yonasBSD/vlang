@@ -5,6 +5,7 @@
 module types
 
 import os
+import v2.ast
 import v2.parser
 import v2.pref
 import v2.token
@@ -92,6 +93,46 @@ fn test_basic_literal_char() {
 fn test_basic_literal_string() {
 	env := check_code('fn main() { x := "hello" }')
 	assert has_type(env, 'string'), 'string literal should have string type'
+}
+
+fn test_os_execute_warning_detection() {
+	os_execute_selector := ast.Expr(ast.SelectorExpr{
+		lhs: ast.Ident{
+			name: 'os'
+		}
+		rhs: ast.Ident{
+			name: 'execute'
+		}
+	})
+	assert is_os_execute_selector(os_execute_selector)
+
+	literal := ast.Expr(ast.StringLiteral{
+		value: 'echo ok'
+	})
+	assert !os_execute_arg_uses_composed_string(literal)
+
+	interpolation := ast.Expr(ast.StringInterLiteral{
+		values: ['echo ', '']
+		inters: [
+			ast.StringInter{
+				expr: ast.Ident{
+					name: 'name'
+				}
+			},
+		]
+	})
+	assert os_execute_arg_uses_composed_string(interpolation)
+
+	concat := ast.Expr(ast.InfixExpr{
+		op:  .plus
+		lhs: ast.Ident{
+			name: 's1'
+		}
+		rhs: ast.Ident{
+			name: 's2'
+		}
+	})
+	assert os_execute_arg_uses_composed_string(concat)
 }
 
 fn test_iclone_struct_clone_returns_self_type() {

@@ -4292,6 +4292,7 @@ fn (mut c Checker) infer_generic_type(param_type Type, arg_type Type, mut type_m
 
 fn (mut c Checker) call_expr(expr ast.CallExpr) Type {
 	lhs_expr := c.resolve_expr(expr.lhs)
+	c.warn_if_composed_os_execute(lhs_expr, expr)
 	if lhs_expr is ast.Ident {
 		match lhs_expr.name {
 			'env' {
@@ -4581,6 +4582,55 @@ fn (mut c Checker) call_expr(expr ast.CallExpr) Type {
 	}
 
 	c.error_with_pos('call on non fn: ${fn_.name()}', expr.pos)
+}
+
+fn (mut c Checker) warn_if_composed_os_execute(lhs_expr ast.Expr, expr ast.CallExpr) {
+	if !is_os_execute_selector(lhs_expr) || expr.args.len == 0 {
+		return
+	}
+	if os_execute_arg_uses_composed_string(expr.args[0]) {
+		c.warn_with_pos('os.execute() with a composed string can be unsafe; use os.exec([]string) for argv-style execution',
+			expr.args[0].pos())
+	}
+}
+
+fn is_os_execute_selector(expr ast.Expr) bool {
+	if expr is ast.SelectorExpr {
+		if expr.lhs is ast.Ident {
+			return expr.lhs.name == 'os' && expr.rhs.name == 'execute'
+		}
+	}
+	return false
+}
+
+fn os_execute_arg_uses_composed_string(expr ast.Expr) bool {
+	return match expr {
+		ast.StringInterLiteral {
+			true
+		}
+		ast.InfixExpr {
+			expr.op == .plus || os_execute_arg_uses_composed_string(expr.lhs)
+				|| os_execute_arg_uses_composed_string(expr.rhs)
+		}
+		ast.ParenExpr {
+			os_execute_arg_uses_composed_string(expr.expr)
+		}
+		ast.ModifierExpr {
+			os_execute_arg_uses_composed_string(expr.expr)
+		}
+		ast.PrefixExpr {
+			os_execute_arg_uses_composed_string(expr.expr)
+		}
+		ast.CastExpr {
+			os_execute_arg_uses_composed_string(expr.expr)
+		}
+		ast.AsCastExpr {
+			os_execute_arg_uses_composed_string(expr.expr)
+		}
+		else {
+			false
+		}
+	}
 }
 
 fn (mut c Checker) array_magic_arg_type(arg ast.Expr, it_type Type) Type {
@@ -5637,9 +5687,14 @@ fn (mut c Checker) error_message(msg string, kind errors.Kind, pos token.Positio
 	errors.error(msg, errors.details(file, pos, 2), kind, pos)
 }
 
-// fn (mut c Checker) warn(msg string) {
-// 	c.error_message(msg, .warning, p.current_position())
-// }
+fn (mut c Checker) warn_with_pos(msg string, pos token.Pos) {
+	if !pos.is_valid() {
+		eprintln('warning: ${msg} (no position info)')
+		return
+	}
+	file := c.file_set.file(pos)
+	c.error_message(msg, .warning, file.position(pos), file)
+}
 
 // [noreturn]
 // fn (mut c Checker) error(msg string) {
