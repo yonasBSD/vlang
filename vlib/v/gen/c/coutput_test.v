@@ -318,7 +318,7 @@ fn main() {
 
 fn test_c_fallback_decl_uses_c_helper_submodule_includes() {
 	test_source := os.join_path(os.vtmp_dir(), 'coutput_c_helper_include')
-	module_path := os.join_path(test_source, 'sdl')
+	module_path := os.join_path(test_source, 'coutput_sdl')
 	c_module_path := os.join_path(module_path, 'c')
 	os.rmdir_all(test_source) or {}
 	os.mkdir_all(c_module_path)!
@@ -336,13 +336,13 @@ pub const used_import = 1
 
 #include "${header_include_path}"
 ')!
-	os.write_file(os.join_path(module_path, 'sdl.v'), 'module sdl
+	os.write_file(os.join_path(module_path, 'coutput_sdl.v'), 'module coutput_sdl
 
-import sdl.c
+import coutput_sdl.c
 
 pub const used_import = c.used_import
 ')!
-	os.write_file(os.join_path(module_path, 'atomic.c.v'), 'module sdl
+	os.write_file(os.join_path(module_path, 'atomic.c.v'), 'module coutput_sdl
 
 fn C.c_helper_decl() bool
 
@@ -355,7 +355,7 @@ pub fn call() {
 	defer {
 		os.chdir(old_wd) or {}
 	}
-	cmd := '${os.quoted_path(vexe)} -shared -o - sdl'
+	cmd := '${os.quoted_path(vexe)} -shared -o - coutput_sdl'
 	compilation := os.execute(cmd)
 	ensure_compilation_succeeded(compilation, cmd)
 	assert compilation.output.contains('#include "${header_include_path}"')
@@ -569,6 +569,10 @@ fn should_skip(relpath string) bool {
 		$if msvc {
 			if relpath.contains('_not_msvc_windows.vv') {
 				eprintln('> skipping ${relpath} on msvc')
+				return true
+			}
+			if relpath.ends_with('cross_printfn_v_malloc.vv') {
+				eprintln('> skipping ${relpath} on msvc, since -cross -printfn does not emit a runnable executable')
 				return true
 			}
 			if relpath.contains('asm_') {
