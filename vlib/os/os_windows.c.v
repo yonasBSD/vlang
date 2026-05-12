@@ -582,7 +582,7 @@ fn windows_execute_command_line(command_line_text string, application_name strin
 	mut expanded_command_line := [32768]u16{}
 	if expand_environment {
 		C.ExpandEnvironmentStringsW(command_line_ptr, voidptr(&expanded_command_line), 32768)
-		command_line_ptr = &expanded_command_line[0]
+		command_line_ptr = unsafe { &expanded_command_line[0] }
 	}
 	mut application_name_ptr := &u16(unsafe { nil })
 	if application_name != '' {
