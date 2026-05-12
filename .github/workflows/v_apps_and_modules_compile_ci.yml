@@ -45,7 +45,7 @@ jobs:
             v retry -- sudo apt -qq install sassc libgit2-dev # needed by gitly
             v retry -- sudo apt -qq install libunwind-18-dev # needed by v-analyzer for libbacktrace
           else
-            v retry brew install sassc libgit2
+            v retry brew install sassc libgit2 libsodium pango fribidi pkg-config
           fi
 
       - name: Build docs generator
