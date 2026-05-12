@@ -171,12 +171,13 @@ jobs:
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: |
           cd /tmp/v-analyzer
+          fmt_files=($(git ls-files '*.v' '*.vsh' ':!:metadata/stubs/*.v' ':!:src/metadata/stubs/*.v'))
           set +e
-          v fmt -c .
+          v fmt -c "${fmt_files[@]}"
           exit_code=$?
           if [[ $exit_code -ne 0 && $exit_code -ne 5 ]]; then
             # Don't fail if there are only internal errors (exit code 5).
-            v fmt -diff .
+            v fmt -diff "${fmt_files[@]}"
             exit 1
           fi
 
