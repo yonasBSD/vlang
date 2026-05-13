@@ -473,6 +473,80 @@ fn test_veb_implicit_ctx_alias_on_context_receiver_tmpl_not_found() {
 	assert not_found_body.contains('return veb__Context_html(&c->Context, _tmpl_res_')
 }
 
+fn test_veb_template_scope_gc_pin_does_not_escape_loop_var() {
+	os.chdir(vroot) or {}
+	test_dir := os.join_path(os.vtmp_dir(), 'coutput_veb_template_scope_gc_pin')
+	os.rmdir_all(test_dir) or {}
+	os.mkdir_all(os.join_path(test_dir, 'templates'))!
+	template_lines := [
+		'<div class="tree-path">',
+		'  @if is_top_directory',
+		'    @for i, p in ctx.parts',
+		'      <a href="/@repo.user_name/@{ctx.make_path(branch_name, i)}">@p</a>',
+		'    @end',
+		'  @end',
+		'  @if is_repo_watcher',
+		'    <span>@watcher_count</span>',
+		'  @end',
+		'</div>',
+	]
+	os.write_file(os.join_path(test_dir, 'templates', 'tree.html'),
+		template_lines.join('\n') + '\n')!
+	test_source := os.join_path(test_dir, 'main.v')
+	source_lines := [
+		'module main',
+		'',
+		'import veb',
+		'',
+		'pub struct Context {',
+		'\tveb.Context',
+		'pub mut:',
+		'\tparts []string',
+		'}',
+		'',
+		'pub struct App {}',
+		'',
+		'pub struct Repo {',
+		'\tuser_name string',
+		'}',
+		'',
+		'pub fn (ctx &Context) make_path(branch_name string, i int) string {',
+		'\treturn branch_name + i.str()',
+		'}',
+		'',
+		'pub fn (mut app App) index(mut ctx Context) veb.Result {',
+		"\trepo := Repo{ user_name: 'gitly' }",
+		"\tbranch_name := 'master'",
+		'\tis_top_directory := true',
+		'\tis_repo_watcher := false',
+		'\twatcher_count := 0',
+		"\treturn \$veb.html('templates/tree.html')",
+		'}',
+		'',
+		'fn main() {',
+		'\tmut app := App{}',
+		"\tmut ctx := Context{ parts: ['src'] }",
+		'\t_ = app.index(mut ctx)',
+		'}',
+	]
+	os.write_file(test_source, source_lines.join('\n') + '\n')!
+	defer {
+		os.rmdir_all(test_dir) or {}
+	}
+	test_exe := os.join_path(test_dir, 'app')
+	compile_cmd := '${os.quoted_path(vexe)} -gc boehm_full_opt -o ${os.quoted_path(test_exe)} ${os.quoted_path(test_source)}'
+	ensure_compilation_succeeded(os.execute(compile_cmd), compile_cmd)
+	c_cmd := '${os.quoted_path(vexe)} -gc boehm_full_opt -o - ${os.quoted_path(test_source)}'
+	compilation := os.execute(c_cmd)
+	ensure_compilation_succeeded(compilation, c_cmd)
+	index_start := 'veb__Result main__App_index(main__App* app, main__Context* ctx) {'
+	assert compilation.output.contains(index_start)
+	index_body := compilation.output.all_after(index_start).all_before('VV_LOC void main__main')
+	assert index_body.contains('string p =')
+	assert !index_body.contains('GC_reachable_here(&p);')
+	assert index_body.contains('veb__Context_html(&ctx->Context, _tmpl_res_')
+}
+
 fn does_line_match_one_of_generated_lines(line string, generated_c_lines []string) bool {
 	for cline in generated_c_lines {
 		if line == cline {

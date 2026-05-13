@@ -7725,6 +7725,11 @@ fn (mut g Gen) scope_gc_pin_pregen(node_pos int) []ScopeGcPin {
 		|| g.pref.gc_mode !in [.boehm_full, .boehm_incr, .boehm_full_opt, .boehm_incr_opt] {
 		return []ScopeGcPin{}
 	}
+	if g.inside_veb_tmpl {
+		// Veb template statements are inlined into the route body; their AST scopes
+		// do not always match the generated C block scopes for template locals.
+		return []ScopeGcPin{}
+	}
 	if g.inside_defer_generation {
 		return []ScopeGcPin{}
 	}
@@ -7830,6 +7835,10 @@ fn (mut g Gen) scope_var_needs_gc_pin(obj ast.Var) bool {
 
 fn (mut g Gen) write_scope_gc_pins(pos token.Pos) {
 	if g.pref.gc_mode !in [.boehm_full, .boehm_incr, .boehm_full_opt, .boehm_incr_opt] {
+		return
+	}
+	if g.inside_veb_tmpl {
+		// See scope_gc_pin_pregen for why template code skips these pins.
 		return
 	}
 	if g.fn_decl == unsafe { nil } || g.fn_decl.scope == unsafe { nil } {

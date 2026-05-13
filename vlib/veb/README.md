@@ -126,6 +126,32 @@ It only affects the default non-SSL picoev backend and currently requires Linux
 or Termux. When running with `-d new_veb`, the fasthttp backend is already
 multi-threaded and ignores `nr_workers`.
 
+## Request-scoped allocation with `-prealloc`
+
+When a `veb` app runs on the `fasthttp` backend and is compiled with
+`-prealloc`, each request is handled inside a scoped prealloc arena created by
+`fasthttp`. V allocations made while decoding the request, creating the
+`veb.Context`, matching routes, running middleware, rendering templates, and
+serializing the response all use that request arena.
+
+The arena is freed after the response has been sent, not merely when the route
+handler returns. On macOS and BSD, the response buffer can be retained by the
+connection while `kqueue` finishes writing it; the arena is detached from the
+request thread and freed after the write completes. This keeps request-local
+allocations cheap while preserving response-buffer lifetime.
+
+Do not store request-scoped strings, arrays, maps, `Context` values, or template
+output in app fields, globals, caches, or other threads unless you deliberately
+copy them into longer-lived storage. Process startup data, route tables, static
+file maps, database pools, and allocations made directly by C libraries are not
+part of the per-request arena.
+
+To trace request arena allocation and free points while developing, build with:
+
+```sh
+v -prealloc -d trace_prealloc -d new_veb run .
+```
+
 ## HTTPS
 
 To serve HTTPS directly from `veb`, pass an `mbedtls.SSLConnectConfig` in `RunParams`:
