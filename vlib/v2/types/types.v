@@ -208,6 +208,7 @@ pub:
 pub struct Pointer {
 pub:
 	base_type Type
+	lifetime  string
 }
 
 // struct String {
@@ -737,6 +738,9 @@ fn (t OptionType) name() string {
 }
 
 fn (t Pointer) name() string {
+	if t.lifetime != '' {
+		return '&^${t.lifetime} ' + t.base_type.name()
+	}
 	return '&' + t.base_type.name()
 }
 

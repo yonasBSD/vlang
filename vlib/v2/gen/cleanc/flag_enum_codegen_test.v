@@ -92,3 +92,60 @@ fn test_generate_c_uses_concrete_map_method_name_in_generic_comptime_body() {
 	assert csrc.contains('Map_string_int__query_item(')
 	assert !csrc.contains('map__query_item(')
 }
+
+fn test_generate_c_filters_lifetime_params_from_generic_struct_binding() {
+	csrc := generate_c_for_test('
+struct Value {
+	n int
+}
+
+struct Ref[^a, T] {
+	value T
+}
+
+struct Holder[^a] {
+	item Ref[^a, Value]
+}
+')
+	assert csrc.contains('struct Ref {')
+	assert csrc.contains('Value value;')
+	assert !csrc.contains('T value;')
+}
+
+fn test_generate_c_lowers_pointer_type_params_receivers_fields_and_generics() {
+	csrc := generate_c_for_test('
+struct Foo {
+	value int
+}
+
+struct Node[T] {
+	value T
+}
+
+struct Holder {
+	item &Foo
+	node &Node[Foo]
+}
+
+fn ptr_value(foo &Foo) int {
+	return foo.value
+}
+
+fn (foo &Foo) method_value() int {
+	return foo.value
+}
+
+fn main() {
+	foo := Foo{}
+	_ := ptr_value(&foo)
+	_ := foo.method_value()
+}
+')
+	assert csrc.contains('Foo* item;')
+	assert csrc.contains('Node* node;')
+	assert csrc.contains('Foo value;')
+	assert csrc.contains('ptr_value(Foo* foo)')
+	assert csrc.contains('Foo__method_value(Foo* foo)')
+	assert !csrc.contains('int item;')
+	assert !csrc.contains('int ptr_value(int foo)')
+}
