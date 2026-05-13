@@ -2360,6 +2360,24 @@ fn (mut g Gen) expr(node ast.Expr) {
 			g.gen_if_expr_value(&node)
 		}
 		ast.PostfixExpr {
+			if node.expr is ast.Ident {
+				ident := node.expr as ast.Ident
+				if ident.name in g.cur_fn_mut_params {
+					if local_type := g.get_local_var_c_type(ident.name) {
+						if local_type.ends_with('*') {
+							g.sb.write_string('(*')
+							g.sb.write_string(c_local_name(ident.name))
+							g.sb.write_u8(`)`)
+							g.sb.write_string(match node.op {
+								.inc { '++' }
+								.dec { '--' }
+								else { '' }
+							})
+							return
+						}
+					}
+				}
+			}
 			g.expr(node.expr)
 			op := match node.op {
 				.inc { '++' }
@@ -3906,6 +3924,10 @@ fn is_header_type_only_const_expr(expr ast.Expr) bool {
 fn (mut g Gen) gen_cast_expr(node ast.CastExpr) {
 	type_name := g.expr_type_to_c(node.typ)
 	if type_name.starts_with('_option_') {
+		if is_none_like_expr(node.expr) {
+			g.sb.write_string('(${type_name}){ .state = 2 }')
+			return
+		}
 		value_type := option_value_type(type_name)
 		if value_type != '' && value_type != 'void' {
 			g.sb.write_string('({ ${type_name} _opt = (${type_name}){ .state = 2 }; ${value_type} _val = ')

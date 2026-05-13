@@ -257,3 +257,29 @@ fn (ig &^a Ignore) matched_dir_entry[^a](dent &DirEntry) Match[IgnoreMatch[^a]] 
 	assert inner_generic.params[0] is ast.LifetimeExpr
 	assert (inner_generic.params[0] as ast.LifetimeExpr).name == 'a'
 }
+
+fn test_explicit_lifetime_interface_method_parse() {
+	file := parse_code('module main
+
+struct ByteSet {}
+
+interface Matcher {
+	non_matching_bytes[^a]() ?&^a ByteSet
+}
+')
+	assert file.stmts.len == 3
+	assert file.stmts[2] is ast.InterfaceDecl
+	decl := file.stmts[2] as ast.InterfaceDecl
+	assert decl.fields.len == 1
+	assert decl.fields[0].name == 'non_matching_bytes'
+	assert decl.fields[0].typ is ast.Type
+	field_type := decl.fields[0].typ as ast.Type
+	assert field_type is ast.FnType
+	fn_type := field_type as ast.FnType
+	assert fn_type.generic_params.len == 1
+	assert fn_type.generic_params[0] is ast.LifetimeExpr
+	assert (fn_type.generic_params[0] as ast.LifetimeExpr).name == 'a'
+	assert fn_type.return_type is ast.Type
+	return_type := fn_type.return_type as ast.Type
+	assert return_type is ast.OptionType
+}

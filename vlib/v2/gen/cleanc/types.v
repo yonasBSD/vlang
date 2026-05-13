@@ -2408,6 +2408,24 @@ fn (mut g Gen) vec_generic_type_to_c(lhs_name string, arg_type string) string {
 	return ''
 }
 
+fn (mut g Gen) fn_type_to_c_signature(fn_type ast.FnType) string {
+	ret_type := if fn_type.return_type !is ast.EmptyExpr {
+		g.expr_type_to_c(fn_type.return_type)
+	} else {
+		'void'
+	}
+	mut params := []string{cap: fn_type.params.len}
+	for param in fn_type.params {
+		mut param_type := g.expr_type_to_c(param.typ)
+		if param.is_mut && !param_type.ends_with('*') {
+			param_type += '*'
+		}
+		params << param_type
+	}
+	params_str := if params.len == 0 { 'void' } else { params.join(', ') }
+	return '${ret_type} (*)(${params_str})'
+}
+
 fn (mut g Gen) expr_type_to_c(e ast.Expr) string {
 	if !expr_has_valid_data(e) {
 		return 'void'
@@ -2463,6 +2481,9 @@ fn (mut g Gen) expr_type_to_c(e ast.Expr) string {
 				return '${g.cur_module}__${name}'
 			}
 			if is_generic_placeholder_type_name(name) {
+				if concrete_c_name := g.active_generic_c_names[name] {
+					return concrete_c_name
+				}
 				if concrete := g.resolve_active_generic_type(name) {
 					return g.types_type_to_c(concrete)
 				}
@@ -2470,6 +2491,13 @@ fn (mut g Gen) expr_type_to_c(e ast.Expr) string {
 			}
 			generic_name := generic_placeholder_c_type_name(name)
 			if generic_name != '' {
+				if concrete_c_name := g.active_generic_c_names[generic_name] {
+					mut out_name := concrete_c_name
+					if unmangle_c_ptr_type(name).ends_with('*') && !out_name.ends_with('*') {
+						out_name += '*'
+					}
+					return out_name
+				}
 				if concrete := g.resolve_active_generic_type(generic_name) {
 					mut concrete_name := g.types_type_to_c(concrete)
 					if unmangle_c_ptr_type(name).ends_with('*') && !concrete_name.ends_with('*') {
@@ -2536,16 +2564,15 @@ fn (mut g Gen) expr_type_to_c(e ast.Expr) string {
 				g.register_alias_type(mapped)
 				return mapped
 			}
-			// Record binding and resolve multi-instantiation
-			arg_name := e.expr.name()
-			if !is_generic_placeholder_type_name(arg_name) {
-				struct_base := if lhs_name.contains('__') {
-					lhs_name.all_after_last('__')
-				} else {
-					lhs_name
-				}
-				g.record_generic_struct_bindings(struct_base, lhs_name, [e.expr])
+			// Record binding and resolve multi-instantiation. The recorder
+			// rejects unresolved placeholders itself, but can resolve active
+			// placeholders inside nested generic arguments.
+			struct_base := if lhs_name.contains('__') {
+				lhs_name.all_after_last('__')
+			} else {
+				lhs_name
 			}
+			g.record_generic_struct_bindings(struct_base, lhs_name, [e.expr])
 			return g.resolve_generic_struct_c_name(lhs_name, [e.expr])
 		}
 		ast.GenericArgs {
@@ -2557,22 +2584,15 @@ fn (mut g Gen) expr_type_to_c(e ast.Expr) string {
 					g.register_alias_type(mapped)
 					return mapped
 				}
-				// Record binding for multi-instantiation (e.g. LinkedList[StructFieldInfo])
-				mut all_concrete := true
-				for a in e.args {
-					if is_generic_placeholder_type_name(a.name()) {
-						all_concrete = false
-						break
-					}
+				// Record binding for multi-instantiation (e.g. LinkedList[StructFieldInfo]).
+				// The recorder rejects unresolved placeholders itself, but can resolve
+				// active placeholders inside nested generic arguments.
+				struct_base := if lhs_name.contains('__') {
+					lhs_name.all_after_last('__')
+				} else {
+					lhs_name
 				}
-				if all_concrete {
-					struct_base := if lhs_name.contains('__') {
-						lhs_name.all_after_last('__')
-					} else {
-						lhs_name
-					}
-					g.record_generic_struct_bindings(struct_base, lhs_name, e.args)
-				}
+				g.record_generic_struct_bindings(struct_base, lhs_name, e.args)
 				return g.resolve_generic_struct_c_name(lhs_name, e.args)
 			}
 			return lhs_name
@@ -2637,7 +2657,7 @@ fn (mut g Gen) expr_type_to_c(e ast.Expr) string {
 				return result_type
 			}
 			if e is ast.FnType {
-				return 'void*'
+				return g.fn_type_to_c_signature(e)
 			}
 			if e is ast.NilType {
 				return 'void*'
@@ -2660,7 +2680,11 @@ fn (mut g Gen) expr_type_to_c(e ast.Expr) string {
 						for i, p in e.params {
 							pname := p.name()
 							if is_generic_placeholder_type_name(pname) {
-								if concrete := g.active_generic_types[pname] {
+								if c_name := g.active_generic_c_names[pname] {
+									resolved_params[i] = ast.Expr(ast.Ident{
+										name: c_name
+									})
+								} else if concrete := g.active_generic_types[pname] {
 									c_name := g.types_type_to_c(concrete)
 									resolved_params[i] = ast.Expr(ast.Ident{
 										name: c_name
@@ -2724,16 +2748,31 @@ fn (mut g Gen) record_generic_struct_bindings(struct_base_name string, struct_c_
 	}
 	// Check that all concrete params are non-placeholder types.
 	mut bindings := map[string]types.Type{}
+	mut c_bindings := map[string]string{}
 	mut param_c_names := []string{cap: concrete_runtime_params.len}
 	for i, param_name in generic_param_names {
 		concrete_expr := concrete_runtime_params[i]
-		if is_generic_placeholder_type_name(concrete_expr.name()) {
+		expr_name := concrete_expr.name()
+		if is_generic_placeholder_type_name(expr_name) {
+			if concrete_type := g.active_generic_types[expr_name] {
+				concrete_c_name := g.active_generic_c_names[expr_name] or {
+					g.types_type_to_c(concrete_type)
+				}
+				bindings[param_name] = concrete_type
+				c_bindings[param_name] = concrete_c_name
+				param_c_names << concrete_c_name
+				continue
+			}
 			return
 		}
 		concrete_c_name := g.expr_type_to_c(concrete_expr)
 		param_c_names << concrete_c_name
 		if concrete_type := g.lookup_type_by_c_name(concrete_c_name) {
 			bindings[param_name] = concrete_type
+			c_bindings[param_name] = concrete_c_name
+		} else if concrete_c_name != '' && concrete_c_name != 'int' {
+			bindings[param_name] = types.Type(types.NamedType(concrete_c_name))
+			c_bindings[param_name] = concrete_c_name
 		}
 	}
 	if bindings.len != generic_param_names.len {
@@ -2759,6 +2798,7 @@ fn (mut g Gen) record_generic_struct_bindings(struct_base_name string, struct_c_
 		instances << GenericStructInstance{
 			params_key: params_key
 			bindings:   bindings.clone()
+			c_bindings: c_bindings.clone()
 			c_name:     inst_c_name
 		}
 		g.generic_struct_instances[struct_c_name] = instances
@@ -2780,14 +2820,17 @@ fn (mut g Gen) record_generic_struct_bindings_with_parent(struct_base_name strin
 		return
 	}
 	mut bindings := map[string]types.Type{}
+	mut c_bindings := map[string]string{}
 	mut param_c_names := []string{cap: concrete_runtime_params.len}
 	for i, param_name in generic_param_names {
 		concrete_expr := concrete_runtime_params[i]
 		expr_name := concrete_expr.name()
 		if is_generic_placeholder_type_name(expr_name) {
 			if parent_type := parent_bindings[expr_name] {
+				concrete_c_name := g.types_type_to_c(parent_type)
 				bindings[param_name] = parent_type
-				param_c_names << g.types_type_to_c(parent_type)
+				c_bindings[param_name] = concrete_c_name
+				param_c_names << concrete_c_name
 				continue
 			}
 			return
@@ -2796,6 +2839,10 @@ fn (mut g Gen) record_generic_struct_bindings_with_parent(struct_base_name strin
 		param_c_names << concrete_c_name
 		if concrete_type := g.lookup_type_by_c_name(concrete_c_name) {
 			bindings[param_name] = concrete_type
+			c_bindings[param_name] = concrete_c_name
+		} else if concrete_c_name != '' && concrete_c_name != 'int' {
+			bindings[param_name] = types.Type(types.NamedType(concrete_c_name))
+			c_bindings[param_name] = concrete_c_name
 		}
 	}
 	if bindings.len != generic_param_names.len {
@@ -2820,6 +2867,7 @@ fn (mut g Gen) record_generic_struct_bindings_with_parent(struct_base_name strin
 		instances << GenericStructInstance{
 			params_key: params_key
 			bindings:   bindings.clone()
+			c_bindings: c_bindings.clone()
 			c_name:     inst_c_name
 		}
 		g.generic_struct_instances[struct_c_name] = instances
@@ -2835,7 +2883,7 @@ fn (mut g Gen) record_generic_struct_bindings_with_parent(struct_base_name strin
 // a non-primary instance, returns the suffixed name.
 fn (mut g Gen) resolve_generic_struct_c_name(base_name string, concrete_params []ast.Expr) string {
 	instances := g.generic_struct_instances[base_name]
-	if instances.len <= 1 {
+	if instances.len == 0 {
 		return base_name
 	}
 	concrete_runtime_params := runtime_generic_args(concrete_params)
@@ -2846,12 +2894,9 @@ fn (mut g Gen) resolve_generic_struct_c_name(base_name string, concrete_params [
 	params_key := param_c_names.join('_')
 	for inst in instances {
 		if inst.params_key == params_key {
-			// If this is a non-primary instance and hasn't been emitted, emit it late
-			if inst.c_name != base_name {
-				body_key := 'body_${inst.c_name}'
-				if body_key !in g.emitted_types {
-					g.emit_late_generic_struct(base_name, inst)
-				}
+			body_key := 'body_${inst.c_name}'
+			if body_key !in g.emitted_types {
+				g.emit_late_generic_struct(base_name, inst)
 			}
 			return inst.c_name
 		}
@@ -2867,16 +2912,21 @@ fn (mut g Gen) emit_late_generic_struct(base_name string, inst GenericStructInst
 	if body_key in g.emitted_types || body_key in g.pending_late_body_keys {
 		return
 	}
+	// Find the struct AST node by base name
+	struct_node := g.find_generic_struct_node(base_name) or { return }
 	// Mark as pending — not yet in g.sb, so option_result_payload_ready won't see it.
 	// It will be moved to emitted_types when late_struct_defs is flushed.
 	g.pending_late_body_keys[body_key] = true
-	// Find the struct AST node by base name
-	struct_node := g.find_generic_struct_node(base_name) or { return }
 	keyword := if struct_node.is_union { 'union' } else { 'struct' }
 	// Generate struct body with this instantiation's bindings
 	prev_active := g.active_generic_types.clone()
+	prev_active_c_names := g.active_generic_c_names.clone()
 	g.active_generic_types = inst.bindings.clone()
+	g.active_generic_c_names = inst.c_bindings.clone()
 	mut def := strings.new_builder(256)
+	if inst.c_name !in g.emitted_types {
+		def.writeln('typedef ${keyword} ${inst.c_name} ${inst.c_name};')
+	}
 	def.writeln('${keyword} ${inst.c_name} {')
 	for field in struct_node.fields {
 		field_type := g.expr_type_to_c(field.typ)
@@ -2896,11 +2946,18 @@ fn (mut g Gen) emit_late_generic_struct(base_name string, inst GenericStructInst
 	g.late_generic_str_instances << inst.c_name
 	def.writeln('')
 	g.active_generic_types = prev_active.clone()
+	g.active_generic_c_names = prev_active_c_names.clone()
 	g.late_struct_defs << def.str()
 }
 
 // find_generic_struct_node finds the AST StructDecl for a given C struct name.
 fn (mut g Gen) find_generic_struct_node(c_name string) ?ast.StructDecl {
+	prev_module := g.cur_module
+	prev_file_name := g.cur_file_name
+	defer {
+		g.cur_module = prev_module
+		g.cur_file_name = prev_file_name
+	}
 	for file in g.files {
 		g.set_file_module(file)
 		for stmt in file.stmts {
@@ -3798,7 +3855,7 @@ fn (mut g Gen) selector_field_type(sel ast.SelectorExpr) string {
 				// In specialized generic functions, the env may return the substituted
 				// generic type param (e.g. Slack for T) instead of the actual struct
 				// field type (e.g. ValueInfo). Cross-check against struct_field_types.
-				if g.active_generic_types.len > 0 {
+				if g.active_generic_types.len > 0 || is_generic_placeholder_type_name(t) {
 					lhs_struct := g.resolve_generic_struct_field_name(sel.lhs)
 					if lhs_struct != '' {
 						if field_t := g.lookup_struct_field_type_by_name(lhs_struct, rhs) {
@@ -3946,7 +4003,9 @@ fn (mut g Gen) resolve_generic_struct_field_name(expr ast.Expr) string {
 			if generic_param_names.len > 0 {
 				mut param_c_names := []string{cap: generic_param_names.len}
 				for param_name in generic_param_names {
-					if concrete := g.active_generic_types[param_name] {
+					if concrete_c_name := g.active_generic_c_names[param_name] {
+						param_c_names << concrete_c_name
+					} else if concrete := g.active_generic_types[param_name] {
 						param_c_names << g.types_type_to_c(concrete)
 					} else {
 						return base // can't resolve, use base

@@ -37,6 +37,13 @@ fn should_keep_builtin_array_decl(decl ast.FnDecl) bool {
 		'__new_array_with_map_default',
 		'new_array_from_c_array',
 		'new_array_from_c_array_no_alloc',
+		'alloc_array_data_like',
+		'alloc_array_data_like_uninit',
+		'buffer_has_slices',
+		'mark_buffer_has_slices',
+		'needs_unique_append',
+		'needs_unique_shift',
+		'needs_unique_shrink',
 		'ensure_cap',
 		'repeat',
 		'repeat_to_depth',
@@ -84,6 +91,7 @@ fn should_keep_builtin_array_decl(decl ast.FnDecl) bool {
 		'pointers',
 		'panic_on_negative_len',
 		'panic_on_negative_cap',
+		'vbytes',
 	]
 }
 
@@ -168,6 +176,7 @@ fn (mut g Gen) emit_missing_array_contains_fallbacks() {
 			continue
 		}
 		g.emitted_types[fn_key] = true
+		g.late_fn_decls << 'bool ${fn_name}(${arr_type} a, ${elem_type} v);\n'
 		g.sb.writeln('')
 		// Fixed arrays are C arrays (e.g., voidptr[20]), not structs — use direct indexing.
 		is_fixed := arr_type.starts_with('Array_fixed_')

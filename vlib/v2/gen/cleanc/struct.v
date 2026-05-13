@@ -53,7 +53,31 @@ fn (mut g Gen) collect_generic_struct_bindings() {
 			// Also scan function bodies for generic type references
 			// (e.g. LinkedList[StructFieldInfo]{} in decode_value)
 			if stmt is ast.FnDecl {
+				for param in stmt.typ.params {
+					g.scan_expr_for_generic_types(param.typ)
+				}
+				if stmt.typ.return_type !is ast.EmptyExpr {
+					g.scan_expr_for_generic_types(stmt.typ.return_type)
+				}
 				g.scan_stmts_for_generic_types(stmt.stmts)
+				if g.generic_fn_param_names(stmt).len > 0 {
+					prev_generic_types := g.active_generic_types.clone()
+					prev_generic_c_names := g.active_generic_c_names.clone()
+					for spec in g.generic_fn_specializations(stmt) {
+						g.active_generic_types = spec.generic_types.clone()
+						g.active_generic_c_names =
+							g.generic_c_names_for_bindings(spec.generic_types)
+						for param in stmt.typ.params {
+							g.scan_expr_for_generic_types(param.typ)
+						}
+						if stmt.typ.return_type !is ast.EmptyExpr {
+							g.scan_expr_for_generic_types(stmt.typ.return_type)
+						}
+						g.scan_stmts_for_generic_types(stmt.stmts)
+					}
+					g.active_generic_types = prev_generic_types.clone()
+					g.active_generic_c_names = prev_generic_c_names.clone()
+				}
 			}
 		}
 	}
@@ -206,15 +230,12 @@ fn (mut g Gen) scan_expr_for_generic_types(e ast.Expr) {
 		ast.GenericArgOrIndexExpr {
 			// e.g. &Node[ValueInfo] → PrefixExpr { GenericArgOrIndexExpr { Ident("Node"), Ident("ValueInfo") } }
 			base_name := g.expr_type_to_c(e.lhs)
-			arg_name := e.expr.name()
-			if !is_generic_placeholder_type_name(arg_name) {
-				struct_base := if base_name.contains('__') {
-					base_name.all_after_last('__')
-				} else {
-					base_name
-				}
-				g.record_generic_struct_bindings(struct_base, base_name, [e.expr])
+			struct_base := if base_name.contains('__') {
+				base_name.all_after_last('__')
+			} else {
+				base_name
 			}
+			g.record_generic_struct_bindings(struct_base, base_name, [e.expr])
 		}
 		ast.GenericArgs {
 			base_name := g.expr_type_to_c(e.lhs)
@@ -259,6 +280,10 @@ fn (mut g Gen) scan_stmts_for_generic_types(stmts []ast.Stmt) {
 			g.scan_stmts_for_generic_types(stmt.stmts)
 		} else if stmt is ast.BlockStmt {
 			g.scan_stmts_for_generic_types(stmt.stmts)
+		} else if stmt is ast.ReturnStmt {
+			for expr in stmt.exprs {
+				g.scan_expr_for_generic_types(expr)
+			}
 		}
 	}
 }
@@ -545,33 +570,39 @@ fn (mut g Gen) gen_struct_decl(node ast.StructDecl) {
 	// Generic structs are emitted using concrete bindings recorded from
 	// GenericType instantiations, falling back to the first binding in env.
 	prev_generic_types := g.active_generic_types.clone()
+	prev_generic_c_names := g.active_generic_c_names.clone()
 	needs_runtime_generic_bindings := struct_generic_params_need_bindings(node.generic_params)
 	if needs_runtime_generic_bindings {
 		struct_c_name := g.get_struct_name(node)
-		if struct_c_name in g.generic_struct_bindings {
-			g.active_generic_types = g.generic_struct_bindings[struct_c_name].clone()
-		} else if instances := g.generic_struct_instances[struct_c_name] {
+		if instances := g.generic_struct_instances[struct_c_name] {
 			// Use the first recorded instance's bindings as the primary struct body.
 			if instances.len > 0 {
 				g.active_generic_types = instances[0].bindings.clone()
+				g.active_generic_c_names = instances[0].c_bindings.clone()
 			} else {
 				g.active_generic_types = g.fallback_generic_bindings_for_names(generic_param_names(node.generic_params)) or {
 					return
 				}
+				g.active_generic_c_names = map[string]string{}
 			}
+		} else if struct_c_name in g.generic_struct_bindings {
+			g.active_generic_types = g.generic_struct_bindings[struct_c_name].clone()
+			g.active_generic_c_names = map[string]string{}
 		} else {
 			g.active_generic_types = g.fallback_generic_bindings_for_names(generic_param_names(node.generic_params)) or {
 				return
 			}
+			g.active_generic_c_names = map[string]string{}
 		}
 	}
 	defer {
 		g.active_generic_types = prev_generic_types.clone()
+		g.active_generic_c_names = prev_generic_c_names.clone()
 	}
 
 	name := g.get_struct_name(node)
 	body_key := 'body_${name}'
-	if body_key in g.emitted_types {
+	if body_key in g.emitted_types || body_key in g.pending_late_body_keys {
 		return
 	}
 	// For generic structs with active bindings, verify that all field types
@@ -779,7 +810,9 @@ fn (mut g Gen) gen_struct_decl(node ast.StructDecl) {
 			g.emitted_types[inst_body_key] = true
 			// Set active generic types to this instantiation's bindings
 			prev_active := g.active_generic_types.clone()
+			prev_active_c_names := g.active_generic_c_names.clone()
 			g.active_generic_types = inst.bindings.clone()
+			g.active_generic_c_names = inst.c_bindings.clone()
 			g.sb.writeln('${keyword} ${inst.c_name} {')
 			for field in node.fields {
 				field_type := g.expr_type_to_c(field.typ)
@@ -803,6 +836,7 @@ fn (mut g Gen) gen_struct_decl(node ast.StructDecl) {
 			}
 			g.sb.writeln('')
 			g.active_generic_types = prev_active.clone()
+			g.active_generic_c_names = prev_active_c_names.clone()
 		}
 	}
 }

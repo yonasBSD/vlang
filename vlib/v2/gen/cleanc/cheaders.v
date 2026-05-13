@@ -563,7 +563,7 @@ fn (mut g Gen) gen_enum_decl(node ast.EnumDecl) {
 	g.sb.writeln('} ${name};')
 	g.sb.writeln('')
 	enum_str_fn := '${name}__str'
-	if enum_str_fn !in g.fn_return_types {
+	if 'fn_${enum_str_fn}' !in g.fn_owner_file {
 		// Emit a macro so the expression is type-checked only at use sites,
 		// where `string` is fully defined.
 		mut enum_str_expr := c_static_v_string_expr('unknown enum value')
@@ -574,7 +574,7 @@ fn (mut g Gen) gen_enum_decl(node ast.EnumDecl) {
 		g.sb.writeln('#define ${name}__str(v) ({ ${name} _e = (v); ${enum_str_expr}; })')
 	}
 	enum_short_str_fn := '${name}_str'
-	if enum_short_str_fn !in g.fn_return_types {
+	if 'fn_${enum_short_str_fn}' !in g.fn_owner_file {
 		g.sb.writeln('#define ${name}_str(v) ${name}__str(v)')
 	}
 	option_name := '_option_' + mangle_alias_component(name)
