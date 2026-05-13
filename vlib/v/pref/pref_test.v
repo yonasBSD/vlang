@@ -532,10 +532,19 @@ fn test_generate_c_project_creates_build_files() {
 		assert os.is_file(os.join_path(output_dir, rel_path))
 	}
 	build_command := os.read_file(os.join_path(output_dir, 'build_command.txt')) or { panic(err) }
-	assert build_command.contains(os.join_path(output_dir, 'json.c'))
+	assert normalized_build_path(build_command).contains(normalized_build_path(os.join_path(output_dir,
+		'json.c')))
 	assert build_command.contains('cJSON.c')
 	assert !build_command.contains('.tmp.c')
 	assert !build_command.contains('.module.')
+}
+
+fn normalized_build_path(path string) string {
+	mut normalized := path.replace('\\', '/')
+	for normalized.contains('//') {
+		normalized = normalized.replace('//', '/')
+	}
+	return normalized
 }
 
 fn test_output_flag_accepts_directory_path() {

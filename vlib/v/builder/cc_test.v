@@ -566,7 +566,11 @@ fn hot_reload_graph_example() string {
 }
 
 fn normalized_test_path(path string) string {
-	return path.replace('\\', '/')
+	mut normalized := path.replace('\\', '/')
+	for normalized.contains('//') {
+		normalized = normalized.replace('//', '/')
+	}
+	return normalized
 }
 
 fn test_c_output_suggests_missing_typedef_for_c_struct_with_issue_19050_output() {

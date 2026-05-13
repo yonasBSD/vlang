@@ -255,6 +255,36 @@ fn test_windows_sharedlive_string_interpolation_in_ternary_does_not_emit_inline_
 	assert compilation.output.contains('builtin__str_intp')
 }
 
+fn test_windows_tcc_atomic_postfix_uses_interlocked_helpers() {
+	os.chdir(vroot) or {}
+	test_source := os.join_path(os.vtmp_dir(), 'coutput_windows_tcc_atomic_postfix.vv')
+	os.write_file(test_source, 'module main
+
+struct App {
+mut:
+	idx atomic int
+}
+
+fn (mut app App) bump() {
+	app.idx++
+}
+
+fn main() {
+	mut app := App{}
+	app.bump()
+}
+')!
+	defer {
+		os.rm(test_source) or {}
+	}
+	cmd := '${os.quoted_path(vexe)} -o - -os windows -cc x86_64-w64-mingw32-tcc ${os.quoted_path(test_source)}'
+	compilation := os.execute(cmd)
+	ensure_compilation_succeeded(compilation, cmd)
+	assert compilation.output.contains('thirdparty/stdatomic/win/atomic.h')
+	assert compilation.output.contains('InterlockedExchangeAdd')
+	assert !compilation.output.contains('__atomic_fetch_add')
+}
+
 fn test_no_main_exports_initialize_windows_runtime() {
 	os.chdir(vroot) or {}
 	test_source := os.join_path(os.vtmp_dir(), 'coutput_no_main_export_windows_init.vv')

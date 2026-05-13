@@ -7,7 +7,8 @@ import v2.pref
 import v2.token
 
 fn parse_code(code string) ast.File {
-	tmp_file := os.join_path(os.temp_dir(), 'v2_parser_test_${os.getpid()}_${time.now().unix_micro()}.v')
+	tmp_file := os.join_path(os.temp_dir(),
+		'v2_parser_test_${os.getpid()}_${time.now().unix_micro()}.v')
 	os.write_file(tmp_file, code) or { panic(err) }
 	defer {
 		os.rm(tmp_file) or {}
@@ -52,7 +53,8 @@ fn assert_anon_struct_array_type(typ ast.Expr, expect_fixed bool) {
 }
 
 fn test_dynamic_array_of_anon_struct_init() {
-	array_init := first_array_init('fn main() { text_syms := []struct { name string value u64 }{} }')
+	array_init :=
+		first_array_init('fn main() { text_syms := []struct { name string value u64 }{} }')
 	assert_anon_struct_array_type(array_init.typ, false)
 }
 
@@ -121,8 +123,10 @@ struct Bar {
 }
 
 fn test_reused_parser_resets_state_between_files() {
-	tmp1 := os.join_path(os.temp_dir(), 'v2_parser_state_${os.getpid()}_${time.now().unix_micro()}_1.v')
-	tmp2 := os.join_path(os.temp_dir(), 'v2_parser_state_${os.getpid()}_${time.now().unix_micro()}_2.v')
+	tmp1 := os.join_path(os.temp_dir(),
+		'v2_parser_state_${os.getpid()}_${time.now().unix_micro()}_1.v')
+	tmp2 := os.join_path(os.temp_dir(),
+		'v2_parser_state_${os.getpid()}_${time.now().unix_micro()}_2.v')
 	os.write_file(tmp1, 'module main
 
 fn main() {
