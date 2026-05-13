@@ -1435,6 +1435,37 @@ fn test_transform_init_expr_adds_nested_struct_defaults() {
 	assert (inner_init.fields[0].value as ast.BasicLiteral).value == '999999'
 }
 
+fn test_transform_init_expr_skips_missing_default_for_pointer_string_field() {
+	builder_type := types.Type(types.Struct{
+		name:   'Builder'
+		fields: [
+			types.Field{
+				name: 'glob'
+				typ:  types.Type(types.Pointer{
+					base_type: types.string_
+					lifetime:  'a'
+				})
+			},
+		]
+	})
+	mut scope := types.new_scope(unsafe { nil })
+	scope.insert('Builder', builder_type)
+	mut t := create_test_transformer()
+	t.cur_module = 'main'
+	t.scope = scope
+	t.cached_scopes = {
+		'main': scope
+	}
+	result := t.transform_init_expr(ast.InitExpr{
+		typ: ast.Expr(ast.Ident{
+			name: 'Builder'
+		})
+	})
+	assert result is ast.InitExpr
+	init := result as ast.InitExpr
+	assert init.fields.len == 0
+}
+
 fn test_transform_map_init_expr_non_empty_lowers_to_runtime_ctor() {
 	mut t := create_test_transformer()
 
@@ -2629,6 +2660,52 @@ fn test_transform_if_expr_map_guard_uses_map_path() {
 	assert result is ast.IfExpr, 'expected map guard IfExpr, got ${result.type_name()}'
 	result_if := result as ast.IfExpr
 	assert result_if.cond !is ast.IfGuardExpr
+}
+
+fn test_transform_resolves_selector_map_for_membership_and_guard() {
+	store_type := types.Type(types.Struct{
+		name:   'Store'
+		fields: [
+			types.Field{
+				name: 'entries'
+				typ:  types.Type(types.Map{
+					key_type:   string_type()
+					value_type: types.Type(types.Array{
+						elem_type: types.Type(types.int_)
+					})
+				})
+			},
+		]
+	})
+	mut t := create_transformer_with_vars({
+		's':   store_type
+		'key': string_type()
+	})
+	entries := ast.Expr(ast.SelectorExpr{
+		lhs: ast.Ident{
+			name: 's'
+		}
+		rhs: ast.Ident{
+			name: 'entries'
+		}
+	})
+	map_type_name := t.get_map_type_for_expr(entries) or {
+		assert false, 'expected selector field to resolve as a map'
+		''
+	}
+	assert map_type_name == 'Map_string_Array_int'
+
+	result := t.transform_infix_expr(ast.InfixExpr{
+		op:  .key_in
+		lhs: ast.Ident{
+			name: 'key'
+		}
+		rhs: entries
+	})
+	assert result is ast.CallExpr, 'expected selector map membership to become map__exists, got ${result.type_name()}'
+	call := result as ast.CallExpr
+	assert call.lhs is ast.Ident
+	assert (call.lhs as ast.Ident).name == 'map__exists'
 }
 
 fn test_transform_for_in_stmt_lowers_to_for_stmt() {
@@ -4271,6 +4348,7 @@ fn main() {
 		if stmt is ast.FnDecl && stmt.name == 'matched_dir_entry' {
 			saw_method = true
 			assert stmt.is_method
+			assert stmt.stmts.len > 0
 			assert stmt.receiver.typ is ast.Type
 			receiver_type := stmt.receiver.typ as ast.Type
 			assert receiver_type is ast.PointerType

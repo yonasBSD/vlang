@@ -73,3 +73,43 @@ fn copy_bag(b Bag) Bag {
 	assert csrc.contains('.state == 0')
 	assert !csrc.contains('if (s)')
 }
+
+fn test_generate_c_wraps_struct_field_option_value() {
+	csrc := generate_result_option_c_for_test('
+struct Ref {
+	value int
+}
+
+struct Holder {
+	item ?&Ref
+}
+
+fn make(r &Ref) Holder {
+	return Holder{
+		item: r
+	}
+}
+')
+	assert csrc.contains('_option_Refptr item;')
+	assert csrc.contains('_option_Refptr _opt = (_option_Refptr){ .state = 2 }; Ref* _val = r; _option_ok(&_val, (_option*)&_opt, sizeof(_val)); _opt;')
+	assert !csrc.contains('.item = r')
+}
+
+fn test_generate_c_borrows_option_field_unwrap_payload_without_temp() {
+	csrc := generate_result_option_c_for_test('
+struct Holder {
+	value ?string
+}
+
+fn (h &Holder) value_ref() ?&string {
+	if h.value != none {
+		return unsafe { &h.value? }
+	}
+	return none
+}
+')
+	assert !csrc.contains('.is_error')
+	assert !csrc.contains('_or_t')
+	assert csrc.contains('(h)->value.state != 0')
+	assert csrc.contains('&(*(string*)(((u8*)(&(h)->value.err)) + sizeof(IError)))')
+}

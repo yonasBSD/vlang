@@ -1,6 +1,13 @@
 @[has_globals]
 module builtin
 
+#insert "@VEXEROOT/vlib/builtin/prealloc_atomics.h"
+
+fn C.v_prealloc_atomic_add_i32(ptr &int, delta int) int
+fn C.v_prealloc_atomic_load_i32(ptr &int) int
+fn C.v_prealloc_atomic_store_i32(ptr &int, val int) int
+fn C.v_prealloc_atomic_cas_i32(ptr &int, expected int, desired int) int
+
 // With -prealloc, V calls libc's malloc to get chunks, each at least 16MB
 // in size, as needed. Once a chunk is available, all malloc() calls within
 // V code, that can fit inside the chunk, will use it instead, each bumping a
@@ -28,11 +35,12 @@ __global g_memory_block &VMemoryBlock
 @[heap]
 struct VMemoryBlock {
 mut:
-	current        &u8           = 0 // 8
-	stop           &u8           = 0 // 8
-	start          &u8           = 0 // 8
-	previous       &VMemoryBlock = 0 // 8
-	next           &VMemoryBlock = 0 // 8
+	current        &u8             = 0 // 8
+	stop           &u8             = 0 // 8
+	start          &u8             = 0 // 8
+	previous       &VMemoryBlock   = 0 // 8
+	next           &VMemoryBlock   = 0 // 8
+	scope          &VPreallocScope = 0
 	min_block_size isize
 	is_scope       bool
 	id             int // 4
@@ -42,8 +50,12 @@ mut:
 @[heap]
 struct VPreallocScope {
 mut:
-	previous &VMemoryBlock = 0
-	first    &VMemoryBlock = 0
+	previous       &VMemoryBlock = 0
+	first          &VMemoryBlock = 0
+	refs           int
+	free_requested int
+	abandoned      int
+	finalized      int
 }
 
 fn vmemory_abort_on_nil(p voidptr, bytes isize) {
@@ -199,12 +211,16 @@ fn vmemory_block_malloc(n isize, align isize) &u8 {
 		mut current := vmemory_align_up(g_memory_block.current, fixed_align)
 		remaining := i64(g_memory_block.stop) - i64(current)
 		if _unlikely_(remaining < n) {
+			was_scope := g_memory_block.is_scope
+			scope := g_memory_block.scope
 			min_block_size := if g_memory_block.min_block_size > 0 {
 				g_memory_block.min_block_size
 			} else {
 				isize(prealloc_block_size)
 			}
 			g_memory_block = vmemory_block_new_sized(g_memory_block, n, fixed_align, min_block_size)
+			g_memory_block.is_scope = was_scope
+			g_memory_block.scope = scope
 			current = vmemory_align_up(g_memory_block.current, fixed_align)
 		}
 		res := &u8(current)
@@ -381,6 +397,7 @@ pub fn prealloc_scope_begin() voidptr {
 		scope.first = vmemory_block_new_sized(scope.previous, isize(prealloc_scope_block_size), 0,
 			isize(prealloc_scope_block_size))
 		scope.first.is_scope = true
+		scope.first.scope = scope
 		g_memory_block = scope.first
 		prealloc_trace_scope(c'begin', scope)
 		return scope
@@ -430,6 +447,99 @@ fn prealloc_scope_free_blocks(scope &VPreallocScope) {
 	}
 }
 
+@[unsafe]
+fn prealloc_scope_request_free(scope &VPreallocScope, abandoned bool) {
+	if scope == unsafe { nil } {
+		return
+	}
+	unsafe {
+		if abandoned {
+			C.v_prealloc_atomic_store_i32(&scope.abandoned, 1)
+		}
+		C.v_prealloc_atomic_store_i32(&scope.free_requested, 1)
+		prealloc_scope_finish_if_ready(scope)
+	}
+}
+
+@[unsafe]
+fn prealloc_scope_finish_if_ready(scope &VPreallocScope) {
+	if scope == unsafe { nil } {
+		return
+	}
+	unsafe {
+		if C.v_prealloc_atomic_load_i32(&scope.free_requested) == 0 {
+			return
+		}
+		if C.v_prealloc_atomic_load_i32(&scope.refs) != 0 {
+			return
+		}
+		if C.v_prealloc_atomic_cas_i32(&scope.finalized, 0, 1) == 0 {
+			return
+		}
+		if C.v_prealloc_atomic_load_i32(&scope.abandoned) == 0 {
+			prealloc_scope_free_blocks(scope)
+		}
+		C.free(scope)
+	}
+}
+
+@[unsafe]
+fn prealloc_scope_detach_current(scope &VPreallocScope) {
+	if scope == unsafe { nil } {
+		return
+	}
+	unsafe {
+		previous := scope.previous
+		if previous != 0 {
+			previous.next = nil
+		}
+		if g_memory_block != 0 && g_memory_block.is_scope && g_memory_block.scope == scope {
+			g_memory_block = previous
+		}
+		scope.previous = nil
+	}
+}
+
+// prealloc_scope_retain_current keeps the current scoped arena alive after the
+// owner calls `prealloc_scope_end`/`prealloc_scope_free_after`. It is used by
+// generated `spawn` wrappers so detached threads can safely receive arguments
+// allocated in a request arena.
+@[unsafe]
+pub fn prealloc_scope_retain_current() voidptr {
+	$if prealloc {
+		unsafe {
+			if g_memory_block == 0 || !g_memory_block.is_scope || g_memory_block.scope == 0 {
+				return nil
+			}
+			scope := g_memory_block.scope
+			C.v_prealloc_atomic_add_i32(&scope.refs, 1)
+			$if trace_prealloc ? {
+				prealloc_trace_scope(c'retain', scope)
+			}
+			return scope
+		}
+	} $else {
+		return unsafe { nil }
+	}
+}
+
+@[unsafe]
+pub fn prealloc_scope_release(scope_ptr voidptr) {
+	$if prealloc {
+		if scope_ptr == unsafe { nil } {
+			return
+		}
+		unsafe {
+			scope := &VPreallocScope(scope_ptr)
+			C.v_prealloc_atomic_add_i32(&scope.refs, -1)
+			$if trace_prealloc ? {
+				prealloc_trace_scope(c'release', scope)
+			}
+			prealloc_scope_finish_if_ready(scope)
+		}
+	}
+}
+
 // prealloc_scope_end frees a nested arena and restores the current thread arena
 // to the state before `prealloc_scope_begin`.
 @[unsafe]
@@ -440,9 +550,8 @@ pub fn prealloc_scope_end(scope_ptr voidptr) {
 	unsafe {
 		scope := &VPreallocScope(scope_ptr)
 		prealloc_trace_scope(c'end', scope)
-		prealloc_scope_free_blocks(scope)
-		g_memory_block = scope.previous
-		C.free(scope)
+		prealloc_scope_detach_current(scope)
+		prealloc_scope_request_free(scope, false)
 	}
 }
 
@@ -456,12 +565,7 @@ pub fn prealloc_scope_leave(scope_ptr voidptr) {
 	unsafe {
 		scope := &VPreallocScope(scope_ptr)
 		prealloc_trace_scope(c'leave', scope)
-		previous := scope.previous
-		if previous != 0 {
-			previous.next = nil
-		}
-		g_memory_block = previous
-		scope.previous = nil
+		prealloc_scope_detach_current(scope)
 	}
 }
 
@@ -474,9 +578,10 @@ pub fn prealloc_scope_abandon(scope_ptr voidptr) {
 		return
 	}
 	unsafe {
-		prealloc_trace_scope(c'abandon', &VPreallocScope(scope_ptr))
+		scope := &VPreallocScope(scope_ptr)
+		prealloc_trace_scope(c'abandon', scope)
 		prealloc_scope_leave(scope_ptr)
-		C.free(scope_ptr)
+		prealloc_scope_request_free(scope, true)
 	}
 }
 
@@ -491,8 +596,7 @@ pub fn prealloc_scope_free_after(scope_ptr voidptr) {
 	unsafe {
 		scope := &VPreallocScope(scope_ptr)
 		prealloc_trace_scope(c'free-after', scope)
-		prealloc_scope_free_blocks(scope)
-		C.free(scope)
+		prealloc_scope_request_free(scope, false)
 	}
 }
 

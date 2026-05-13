@@ -140,11 +140,15 @@ connection while `kqueue` finishes writing it; the arena is detached from the
 request thread and freed after the write completes. This keeps request-local
 allocations cheap while preserving response-buffer lifetime.
 
-Do not store request-scoped strings, arrays, maps, `Context` values, or template
-output in app fields, globals, caches, or other threads unless you deliberately
-copy them into longer-lived storage. Process startup data, route tables, static
-file maps, database pools, and allocations made directly by C libraries are not
-part of the per-request arena.
+When a handler starts V `spawn` work while the request scope is active, the
+generated thread wrapper retains the request arena until the spawned function
+returns, so veb app code does not need to manually copy request strings just to
+pass them to a background task. Void spawned functions also run inside their own
+scoped arena, which is freed at thread exit. Do not store request-scoped strings,
+arrays, maps, `Context` values, or template output in app fields, globals, or
+caches unless you deliberately copy them into longer-lived storage. Process
+startup data, route tables, static file maps, database pools, and allocations
+made directly by C libraries are not part of the per-request arena.
 
 To trace request arena allocation and free points while developing, build with:
 

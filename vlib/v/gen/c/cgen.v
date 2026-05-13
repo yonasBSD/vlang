@@ -1988,13 +1988,21 @@ fn (mut g Gen) register_thread_wait_call(eltyp string) {
 		g.gowrappers.writeln('\tif (stat != WAIT_OBJECT_0) { builtin___v_panic(_S("error waiting thread")); }')
 		g.gowrappers.writeln('\tCloseHandle(thread.handle);')
 		g.gowrappers.writeln('\tres = *(${eltyp}*)(thread.ret_ptr);')
-		g.gowrappers.writeln('\tbuiltin___v_free(thread.ret_ptr);')
+		if g.pref.prealloc {
+			g.gowrappers.writeln('\tfree(thread.ret_ptr);')
+		} else {
+			g.gowrappers.writeln('\tbuiltin___v_free(thread.ret_ptr);')
+		}
 	} else {
 		g.gowrappers.writeln('\tvoid* ret_val;')
 		g.gowrappers.writeln('\tint stat = pthread_join(thread, &ret_val);')
 		g.gowrappers.writeln('\tif (stat != 0) { builtin___v_panic(_S("error waiting thread")); }')
 		g.gowrappers.writeln('\tres = *(${eltyp}*)ret_val;')
-		g.gowrappers.writeln('\tbuiltin___v_free(ret_val);')
+		if g.pref.prealloc {
+			g.gowrappers.writeln('\tfree(ret_val);')
+		} else {
+			g.gowrappers.writeln('\tbuiltin___v_free(ret_val);')
+		}
 	}
 	g.gowrappers.writeln('\treturn res;')
 	g.gowrappers.writeln('}')

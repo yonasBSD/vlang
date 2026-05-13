@@ -187,6 +187,7 @@ fn (mut w Walker) seed_roots() bool {
 		}
 	}
 	if has_root {
+		w.seed_generic_specialization_roots()
 		// Also seed module init() functions (called from synthesized main)
 		for i, info in w.fns {
 			if is_module_init(info) {
@@ -201,7 +202,37 @@ fn (mut w Walker) seed_roots() bool {
 			has_root = true
 		}
 	}
+	if has_root {
+		w.seed_generic_specialization_roots()
+	}
 	return has_root
+}
+
+fn generic_base_name_from_key(key string) string {
+	mut name := key
+	bracket_idx := name.index_u8(`[`)
+	if bracket_idx > 0 {
+		name = name[..bracket_idx]
+	}
+	dot_idx := name.last_index_u8(`.`)
+	if dot_idx > 0 && dot_idx < name.len - 1 {
+		name = name[dot_idx + 1..]
+	}
+	return strip_generic_specialization_suffix(name)
+}
+
+fn (mut w Walker) seed_generic_specialization_roots() {
+	if w.env == unsafe { nil } {
+		return
+	}
+	for key, _ in w.env.generic_types {
+		base_name := generic_base_name_from_key(key)
+		if base_name == '' {
+			continue
+		}
+		w.mark_lookup('fn:${base_name}')
+		w.mark_lookup('mname:${base_name}')
+	}
 }
 
 fn is_main_root(info FnInfo) bool {
@@ -305,29 +336,62 @@ fn type_name_candidates_from_type(mod_name string, typ types.Type) []string {
 	return out
 }
 
-fn receiver_names_from_decl(mod_name string, decl ast.FnDecl, env &types.Environment) []string {
-	mut out := []string{}
-	match decl.receiver.typ {
+fn add_receiver_name_candidates(mut out []string, mod_name string, raw_name string) {
+	name := sanitize_receiver_name(raw_name)
+	if name == '' {
+		return
+	}
+	add_unique_string(mut out, name)
+	add_unique_string(mut out, maybe_trim_module_prefix(mod_name, name))
+	if name.contains('__') {
+		add_unique_string(mut out, name.all_after_last('__'))
+	} else if mod_name != '' && mod_name != 'main' {
+		add_unique_string(mut out, '${mod_name}__${name}')
+	}
+}
+
+fn receiver_type_expr_name(expr ast.Expr) string {
+	match expr {
 		ast.Ident {
-			name := sanitize_receiver_name(decl.receiver.typ.name)
-			add_unique_string(mut out, name)
-			add_unique_string(mut out, maybe_trim_module_prefix(mod_name, name))
-			if mod_name != '' && mod_name != 'main' {
-				add_unique_string(mut out, '${mod_name}__${name}')
-			}
+			return expr.name
+		}
+		ast.SelectorExpr {
+			return expr.rhs.name
 		}
 		ast.PrefixExpr {
-			if decl.receiver.typ.expr is ast.Ident {
-				name := sanitize_receiver_name(decl.receiver.typ.expr.name)
-				add_unique_string(mut out, name)
-				add_unique_string(mut out, maybe_trim_module_prefix(mod_name, name))
-				if mod_name != '' && mod_name != 'main' {
-					add_unique_string(mut out, '${mod_name}__${name}')
+			if expr.op == .amp {
+				return receiver_type_expr_name(expr.expr)
+			}
+		}
+		ast.ModifierExpr {
+			return receiver_type_expr_name(expr.expr)
+		}
+		ast.GenericArgs {
+			return receiver_type_expr_name(expr.lhs)
+		}
+		ast.GenericArgOrIndexExpr {
+			return receiver_type_expr_name(expr.lhs)
+		}
+		ast.Type {
+			match expr {
+				ast.PointerType {
+					return receiver_type_expr_name(expr.base_type)
 				}
+				ast.GenericType {
+					return receiver_type_expr_name(expr.name)
+				}
+				else {}
 			}
 		}
 		else {}
 	}
+
+	return ''
+}
+
+fn receiver_names_from_decl(mod_name string, decl ast.FnDecl, env &types.Environment) []string {
+	mut out := []string{}
+	add_receiver_name_candidates(mut out, mod_name, receiver_type_expr_name(decl.receiver.typ))
 
 	// Method on []ElemType — receiver name is Array_ElemType.
 	// Use the string name which includes [] prefix for array types.
@@ -363,7 +427,8 @@ fn receiver_primary_name(mod_name string, decl ast.FnDecl, env &types.Environmen
 }
 
 fn normalize_method_name(name string) string {
-	return match name {
+	base_name := strip_generic_specialization_suffix(name)
+	return match base_name {
 		'+' { 'plus' }
 		'-' { 'minus' }
 		'*' { 'mul' }
@@ -375,7 +440,7 @@ fn normalize_method_name(name string) string {
 		'>' { 'gt' }
 		'<=' { 'le' }
 		'>=' { 'ge' }
-		else { name }
+		else { base_name }
 	}
 }
 
@@ -551,6 +616,10 @@ fn (mut w Walker) mark_lookup(key string) {
 fn called_fn_name_candidates(name string) []string {
 	mut out := []string{}
 	add_unique_string(mut out, name)
+	generic_base := strip_generic_specialization_suffix(name)
+	if generic_base != name {
+		add_unique_string(mut out, generic_base)
+	}
 	if name == 'builtin__new_array_from_c_array_noscan' {
 		add_unique_string(mut out, 'new_array_from_c_array')
 		return out
@@ -571,6 +640,15 @@ fn called_fn_name_candidates(name string) []string {
 		add_unique_string(mut out, 'array__${method_name}')
 	}
 	return out
+}
+
+fn strip_generic_specialization_suffix(name string) string {
+	if idx := name.index('_T_') {
+		if idx > 0 {
+			return name[..idx]
+		}
+	}
+	return name
 }
 
 fn should_mark_ident_as_fn(name string) bool {
@@ -854,8 +932,11 @@ fn (mut w Walker) mark_call_lhs(lhs ast.Expr, mod_name string) {
 			}
 			receivers := w.receiver_candidates_for_expr(lhs.lhs, mod_name)
 			if receivers.len > 0 {
+				prev_queue_len := w.queue.len
 				w.mark_method_name(method_name, receivers)
-				return
+				if w.queue.len > prev_queue_len {
+					return
+				}
 			}
 			w.mark_method_name_fallback(method_name)
 		}

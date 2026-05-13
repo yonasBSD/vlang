@@ -3675,18 +3675,21 @@ fn (mut c Checker) if_expr(expr ast.IfExpr) Type {
 fn (mut c Checker) match_expr(expr ast.MatchExpr, used_as_expr bool) Type {
 	expr_type := c.expr(expr.expr)
 	expected_type := c.expected_type
-	if expr_type is Enum {
-		c.expected_type = to_optional_type(Type(expr_type))
+	cond_expected_type := if expr_type is Enum {
+		to_optional_type(Type(expr_type))
 	} else {
 		expr_base := expr_type.base_type()
 		if expr_base is Enum {
-			c.expected_type = to_optional_type(Type(expr_base))
+			to_optional_type(Type(expr_base))
+		} else {
+			expected_type
 		}
 	}
 	mut last_stmt_type := Type(void_)
 	for _, branch in expr.branches {
 		c.open_scope()
 		for cond in branch.cond {
+			c.expected_type = cond_expected_type
 			expr_unwrapped := c.unwrap_ident(expr.expr)
 			cond_type := c.expr(cond)
 			if cond is ast.Ident || cond is ast.SelectorExpr {
@@ -3697,6 +3700,7 @@ fn (mut c Checker) match_expr(expr ast.MatchExpr, used_as_expr bool) Type {
 				c.apply_smartcast(expr_unwrapped, cond_type)
 			}
 		}
+		c.expected_type = expected_type
 		c.stmt_list(branch.stmts)
 		// mut is_noreturn := false
 		if used_as_expr {

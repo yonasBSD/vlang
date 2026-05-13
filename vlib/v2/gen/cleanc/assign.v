@@ -397,6 +397,12 @@ fn (mut g Gen) gen_assign_stmt(node ast.AssignStmt) {
 				typ = cast_type
 			}
 		}
+		if rhs is ast.InitExpr {
+			init_type := g.expr_type_to_c(rhs.typ)
+			if init_type != '' && init_type !in ['int', 'void'] {
+				typ = g.specialized_generic_c_name_from_type_expr(rhs.typ, init_type)
+			}
+		}
 		if rhs is ast.PrefixExpr && rhs.op == .mul && rhs.expr is ast.CastExpr {
 			cast_type := g.expr_type_to_c(rhs.expr.typ)
 			if cast_type.ends_with('*') {
@@ -408,7 +414,11 @@ fn (mut g Gen) gen_assign_stmt(node ast.AssignStmt) {
 		// prefer the scope-registered type over the RHS expression type.
 		if name.starts_with('_or_t') || name.starts_with('_tmp_') || name.starts_with('_defer_t') {
 			if raw_type := g.get_raw_type(lhs) {
-				scope_type := g.types_type_to_c(raw_type)
+				mut scope_type := g.types_type_to_c(raw_type)
+				elem_type := legacy_fixed_array_elem_type(scope_type)
+				if elem_type != '' {
+					scope_type = elem_type
+				}
 				if scope_type != '' && scope_type != 'int' {
 					generic_container_fallback :=
 						(typ == 'array' && scope_type.starts_with('Array_'))
@@ -584,7 +594,11 @@ fn (mut g Gen) gen_assign_stmt(node ast.AssignStmt) {
 				if obj !is types.Module {
 					obj_type := obj.typ()
 					if obj_type !is types.Alias {
-						scoped_type := g.types_type_to_c(obj_type)
+						mut scoped_type := g.types_type_to_c(obj_type)
+						elem_type := legacy_fixed_array_elem_type(scoped_type)
+						if elem_type != '' {
+							scoped_type = elem_type
+						}
 						generic_container_fallback :=
 							(typ == 'array' && scoped_type.starts_with('Array_'))
 							|| (typ == 'map' && scoped_type.starts_with('Map_'))
@@ -719,6 +733,10 @@ fn (mut g Gen) gen_assign_stmt(node ast.AssignStmt) {
 		}
 		if rhs is ast.IfExpr {
 			if !g.if_expr_can_be_ternary(&rhs) && rhs.else_expr !is ast.EmptyExpr {
+				if_type := g.get_if_expr_type(&rhs)
+				if if_type != '' && if_type != 'int' && if_type != 'void' {
+					typ = if_type
+				}
 				// If type is void/empty, infer from the branch's last expression
 				if typ == 'void' || typ == '' {
 					if rhs.stmts.len > 0 {
@@ -884,6 +902,25 @@ fn (mut g Gen) gen_assign_stmt(node ast.AssignStmt) {
 		}
 		if typ == '' || typ == 'void' {
 			typ = 'int'
+		}
+		if rhs is ast.IfExpr {
+			if_type := g.get_if_expr_type(&rhs)
+			if if_type != '' && if_type != 'int' && if_type != 'void' {
+				typ = if_type
+			}
+		}
+		if rhs is ast.InitExpr {
+			typ = g.specialized_generic_c_name_from_type_expr(rhs.typ, typ)
+		}
+		if rhs is ast.IndexExpr {
+			elem_type := g.infer_array_elem_type_from_expr(rhs.lhs)
+			if elem_type != '' && elem_type != 'array' && elem_type != 'int' {
+				typ = elem_type
+			}
+		}
+		legacy_elem_type := legacy_fixed_array_elem_type(typ)
+		if legacy_elem_type != '' {
+			typ = legacy_elem_type
 		}
 		g.register_alias_type(typ)
 		if typ.starts_with('Array_') && !typ.starts_with('Array_fixed_') && !typ.ends_with('*') {

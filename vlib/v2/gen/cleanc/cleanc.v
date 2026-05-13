@@ -38,8 +38,9 @@ mut:
 	comptime_field_raw_type types.Type = types.Struct{} // raw types.Type for comptime checks
 	comptime_field_attrs    []string // current field attributes
 	comptime_field_idx      int      // current field index
-	comptime_val_var        string   // the struct variable being decoded (e.g., 'val')
-	comptime_val_type       string   // C type of val (e.g., 'Slack')
+	comptime_continue_label string
+	comptime_val_var        string // the struct variable being decoded (e.g., 'val')
+	comptime_val_type       string // C type of val (e.g., 'Slack')
 
 	fixed_array_fields          map[string]bool
 	fixed_array_field_elem      map[string]string
@@ -70,6 +71,7 @@ mut:
 	ierror_wrapper_bases        map[string]bool
 	needed_ierror_wrapper_bases map[string]bool
 	tmp_counter                 int
+	runtime_loop_depth          int
 	cur_fn_mut_params           map[string]bool   // names of mut params in current function
 	global_var_modules          map[string]string // global var name → module name
 	global_var_types            map[string]string // global var name → C type string
@@ -998,6 +1000,7 @@ pub fn (mut g Gen) gen_passes_1_to_4() {
 							if spec_key !in g.fn_owner_file {
 								g.fn_owner_file[spec_key] = fi
 							}
+							g.undef_possible_str_macro(spec.name)
 							g.gen_fn_head_with_name(stmt, spec.name)
 							g.sb.writeln(';')
 						}
@@ -1010,6 +1013,50 @@ pub fn (mut g Gen) gen_passes_1_to_4() {
 						}
 					}
 					continue
+				}
+				recv_generic_params := receiver_generic_param_names(stmt)
+				if recv_generic_params.len > 0 {
+					all_bindings := g.get_all_receiver_generic_bindings(stmt)
+					if all_bindings.len > 0 {
+						prev_generic_types := g.active_generic_types.clone()
+						prev_generic_c_names := g.active_generic_c_names.clone()
+						for bindings in all_bindings {
+							g.active_generic_types = bindings.clone()
+							g.active_generic_c_names = g.generic_c_names_for_bindings(bindings)
+							fn_name := g.get_fn_name(stmt)
+							if fn_name == '' {
+								continue
+							}
+							fn_key := 'fn_${fn_name}'
+							if fn_key !in g.fn_owner_file {
+								g.fn_owner_file[fn_key] = fi
+							}
+							g.undef_possible_str_macro(fn_name)
+							g.gen_fn_head_with_name(stmt, fn_name)
+							g.sb.writeln(';')
+						}
+						g.active_generic_types = prev_generic_types.clone()
+						g.active_generic_c_names = prev_generic_c_names.clone()
+						continue
+					} else if bindings := g.get_receiver_generic_bindings(stmt) {
+						prev_generic_types := g.active_generic_types.clone()
+						prev_generic_c_names := g.active_generic_c_names.clone()
+						g.active_generic_types = bindings.clone()
+						g.active_generic_c_names = g.generic_c_names_for_bindings(bindings)
+						fn_name := g.get_fn_name(stmt)
+						if fn_name != '' {
+							fn_key := 'fn_${fn_name}'
+							if fn_key !in g.fn_owner_file {
+								g.fn_owner_file[fn_key] = fi
+							}
+							g.undef_possible_str_macro(fn_name)
+							g.gen_fn_head_with_name(stmt, fn_name)
+							g.sb.writeln(';')
+						}
+						g.active_generic_types = prev_generic_types.clone()
+						g.active_generic_c_names = prev_generic_c_names.clone()
+						continue
+					}
 				}
 				fn_name := g.get_fn_name(stmt)
 				if fn_name == '' {
@@ -1034,6 +1081,7 @@ pub fn (mut g Gen) gen_passes_1_to_4() {
 						g.cur_fn_scope = fn_scope
 					}
 				}
+				g.undef_possible_str_macro(fn_name)
 				g.gen_fn_head(stmt)
 				g.sb.writeln(';')
 			}

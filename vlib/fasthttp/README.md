@@ -185,9 +185,12 @@ the scope from the request thread and frees it after the write completes.
 This means request-local V allocations are cheap bump-pointer allocations, and
 freeing them does not require walking individual objects. Startup state, server
 state, and allocations made directly by C libraries are not part of a request
-arena. Manual takeover responses transfer ownership to user code and currently
-abandon the request arena, so long-lived takeover handlers should manage their
-own allocation lifetime explicitly.
+arena. If a handler starts V `spawn` work while the request scope is active, the
+generated thread wrapper retains that scope until the spawned function returns;
+void spawned functions also run inside their own scoped arena, which is freed at
+thread exit. Manual takeover responses transfer ownership to user code and
+currently abandon the request arena, so long-lived takeover handlers should
+manage their own allocation lifetime explicitly.
 
 To inspect request arena usage while developing, build with:
 

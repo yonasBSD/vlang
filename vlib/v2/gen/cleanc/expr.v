@@ -1407,7 +1407,7 @@ fn (mut g Gen) gen_infix_expr(node &ast.InfixExpr) {
 			g.expr(node.rhs)
 		}
 		struct_type := g.lookup_struct_type_by_c_name(cmp_type)
-		if struct_type.fields.len > 0 && g.struct_has_ref_fields(struct_type) {
+		if struct_type.fields.len > 0 {
 			eq_expr := g.gen_struct_field_eq_expr(struct_type, ltmp, rtmp)
 			if node.op == .eq {
 				g.sb.write_string('; ${eq_expr}; })')
@@ -3034,6 +3034,21 @@ fn (mut g Gen) gen_index_expr(node ast.IndexExpr) {
 			return
 		}
 	}
+	lhs_unwrapped := g.unwrap_parens(node.lhs)
+	if lhs_unwrapped is ast.CallExpr {
+		call_name := g.resolve_call_name(lhs_unwrapped.lhs, lhs_unwrapped.args.len)
+		if call_name.contains('array_from_c_array') {
+			elem_type := g.infer_array_elem_type_from_expr(lhs_unwrapped)
+			if elem_type != '' && elem_type != 'array' && elem_type != 'int' {
+				g.sb.write_string('((${elem_type}*)')
+				g.expr(lhs_unwrapped)
+				g.sb.write_string('.data)[')
+				g.gen_index_expr_value(node.expr)
+				g.sb.write_string(']')
+				return
+			}
+		}
+	}
 	// Fixed-size array struct fields are emitted as plain C arrays.
 	if node.lhs is ast.SelectorExpr && g.is_fixed_array_selector(node.lhs) {
 		g.expr(node.lhs)
@@ -3054,7 +3069,13 @@ fn (mut g Gen) gen_index_expr(node ast.IndexExpr) {
 		}
 		if raw_type is types.Array {
 			// Dynamic arrays: ((elem_type*)arr.data)[idx]
-			elem_type := g.types_type_to_c(raw_type.elem_type)
+			mut elem_type := g.types_type_to_c(raw_type.elem_type)
+			if (elem_type == '' || elem_type == 'int') && node.lhs is ast.CallExpr {
+				call_elem := g.infer_array_elem_type_from_expr(node.lhs)
+				if call_elem != '' && call_elem != 'array' && call_elem != 'int' {
+					elem_type = call_elem
+				}
+			}
 			g.sb.write_string('((${elem_type}*)')
 			g.expr(node.lhs)
 			g.sb.write_string('.data)[')
@@ -3065,7 +3086,13 @@ fn (mut g Gen) gen_index_expr(node ast.IndexExpr) {
 		if raw_type is types.Alias {
 			match raw_type.base_type {
 				types.Array {
-					elem_type := g.types_type_to_c(raw_type.base_type.elem_type)
+					mut elem_type := g.types_type_to_c(raw_type.base_type.elem_type)
+					if (elem_type == '' || elem_type == 'int') && node.lhs is ast.CallExpr {
+						call_elem := g.infer_array_elem_type_from_expr(node.lhs)
+						if call_elem != '' && call_elem != 'array' && call_elem != 'int' {
+							elem_type = call_elem
+						}
+					}
 					g.sb.write_string('((${elem_type}*)')
 					g.expr(node.lhs)
 					g.sb.write_string('.data)[')
@@ -3285,11 +3312,19 @@ fn (mut g Gen) gen_index_expr(node ast.IndexExpr) {
 				if node.lhs is ast.CallExpr {
 					call_name := g.resolve_call_name(node.lhs.lhs, node.lhs.args.len)
 					if call_name.contains('array_from_c_array') && node.lhs.args.len >= 3 {
+						if node.lhs.args.len >= 4 {
+							call_elem := g.infer_array_elem_type_from_expr(node.lhs.args[3])
+							if call_elem != '' && call_elem != 'array' && call_elem != 'int' {
+								elem_type = call_elem
+							}
+						}
 						// Extract elem type from sizeof(T) in 3rd arg
-						sizeof_arg := node.lhs.args[2]
-						if sizeof_arg is ast.KeywordOperator && sizeof_arg.op == .key_sizeof {
-							if sizeof_arg.exprs.len > 0 {
-								elem_type = g.expr_type_to_c(sizeof_arg.exprs[0])
+						if elem_type == '' || elem_type == 'int' {
+							sizeof_arg := node.lhs.args[2]
+							if sizeof_arg is ast.KeywordOperator && sizeof_arg.op == .key_sizeof {
+								if sizeof_arg.exprs.len > 0 {
+									elem_type = g.expr_type_to_c(sizeof_arg.exprs[0])
+								}
 							}
 						}
 					} else if node.lhs.args.len > 0 {
@@ -3654,6 +3689,17 @@ fn (g &Gen) comptime_matches_keyword(typ types.Type, keyword string) bool {
 	}
 }
 
+fn comptime_attrs_array_c_expr(attrs []string) string {
+	if attrs.len == 0 {
+		return '__new_array_with_default_noscan(0, 0, sizeof(string), NULL)'
+	}
+	mut parts := []string{cap: attrs.len}
+	for attr in attrs {
+		parts << c_static_v_string_expr(attr)
+	}
+	return 'new_array_from_c_array(${attrs.len}, ${attrs.len}, sizeof(string), &(string[${attrs.len}]){${parts.join(', ')}})'
+}
+
 // gen_comptime_field_selector handles comptime field access patterns:
 // - field.name → V string literal with field name
 // - field.name.str → C string literal
@@ -3715,7 +3761,7 @@ fn (mut g Gen) gen_comptime_field_selector(sel ast.SelectorExpr) bool {
 					return true
 				}
 				'attrs' {
-					g.sb.write_string('((Array_string){0})')
+					g.sb.write_string(comptime_attrs_array_c_expr(g.comptime_field_attrs))
 					return true
 				}
 				else {}

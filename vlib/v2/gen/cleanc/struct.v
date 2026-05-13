@@ -1424,6 +1424,14 @@ fn struct_field_needs_explicit_default(field types.Field) bool {
 	return field_type is types.Array || field_type is types.String
 }
 
+fn (mut g Gen) struct_field_needs_explicit_default_for(struct_type string, env_struct types.Struct, field types.Field) bool {
+	expected_field_type := g.init_field_expected_type(struct_type, env_struct, field.name)
+	if expected_field_type.ends_with('*') || is_type_name_pointer_like(expected_field_type) {
+		return false
+	}
+	return struct_field_needs_explicit_default(field)
+}
+
 fn (mut g Gen) write_struct_field_default_value(field types.Field) bool {
 	field_type := unwrap_alias_type(field.typ)
 	if field_type is types.Array {
@@ -1459,7 +1467,45 @@ fn (mut g Gen) gen_none_literal_for_type(type_name string) bool {
 	return false
 }
 
+fn (mut g Gen) gen_option_wrapped_value(type_name string, value ast.Expr) bool {
+	trimmed := type_name.trim_space()
+	if !trimmed.starts_with('_option_') {
+		return false
+	}
+	if is_none_like_expr(value) {
+		return g.gen_none_literal_for_type(trimmed)
+	}
+	value_type := option_value_type(trimmed)
+	if value_type == '' || value_type == 'void' {
+		return false
+	}
+	if g.get_expr_type(value) == trimmed {
+		g.expr(value)
+		return true
+	}
+	g.sb.write_string('({ ${trimmed} _opt = (${trimmed}){ .state = 2 }; ${value_type} _val = ')
+	if g.is_interface_type(value_type) && g.gen_interface_cast(value_type, value) {
+		// interface wrapping handled
+	} else {
+		g.expr(value)
+	}
+	g.sb.write_string('; _option_ok(&_val, (_option*)&_opt, sizeof(_val)); _opt; })')
+	return true
+}
+
 fn (mut g Gen) init_field_expected_type(type_name string, env_struct types.Struct, field_name string) string {
+	if decl_info := g.find_struct_decl_info_by_c_name(type_name) {
+		saved_module := g.cur_module
+		g.cur_module = decl_info.mod
+		defer {
+			g.cur_module = saved_module
+		}
+		for ast_field in decl_info.decl.fields {
+			if ast_field.name == field_name {
+				return g.expr_type_to_c(ast_field.typ)
+			}
+		}
+	}
 	expected_key := '${type_name}.${field_name}'
 	mut expected_field_type := g.struct_field_types[expected_key] or { '' }
 	if expected_field_type == '' && type_name.contains('__') {
@@ -1532,7 +1578,12 @@ fn (mut g Gen) gen_channel_init_expr(node ast.InitExpr) bool {
 }
 
 fn (mut g Gen) gen_init_expr(node ast.InitExpr) {
-	type_name := g.expr_type_to_c(node.typ)
+	mut type_name := g.expr_type_to_c(node.typ)
+	type_name = g.specialized_generic_c_name_from_type_expr(node.typ, type_name)
+	if g.cur_fn_ret_type != '' && type_name != g.cur_fn_ret_type
+		&& g.cur_fn_ret_type.starts_with('${type_name}_T_') {
+		type_name = g.cur_fn_ret_type
+	}
 	if g.gen_channel_init_expr(node) {
 		return
 	}
@@ -1564,7 +1615,7 @@ fn (mut g Gen) gen_init_expr(node ast.InitExpr) {
 			mut wrote_defaults := 0
 			g.sb.write_string('((${type_name}){')
 			for field in env_struct.fields {
-				if !struct_field_needs_explicit_default(field) {
+				if !g.struct_field_needs_explicit_default_for(type_name, env_struct, field) {
 					continue
 				}
 				if wrote_defaults > 0 {
@@ -1579,7 +1630,7 @@ fn (mut g Gen) gen_init_expr(node ast.InitExpr) {
 			for emb in env_struct.embedded {
 				emb_name := emb.name.all_after_last('__')
 				for field in emb.fields {
-					if !struct_field_needs_explicit_default(field) {
+					if !g.struct_field_needs_explicit_default_for(type_name, env_struct, field) {
 						continue
 					}
 					if wrote_defaults > 0 {
@@ -1691,6 +1742,9 @@ fn (mut g Gen) gen_init_expr(node ast.InitExpr) {
 		if is_none_like_expr(field.value) && g.gen_none_literal_for_type(expected_field_type) {
 			continue
 		}
+		if g.gen_option_wrapped_value(expected_field_type, field.value) {
+			continue
+		}
 		if g.is_fn_pointer_alias_type(expected_field_type) {
 			if field.value is ast.SelectorExpr {
 				sel := field.value as ast.SelectorExpr
@@ -1762,7 +1816,7 @@ fn (mut g Gen) gen_init_expr(node ast.InitExpr) {
 			if initialized_fields[field.name] {
 				continue
 			}
-			if !struct_field_needs_explicit_default(field) {
+			if !g.struct_field_needs_explicit_default_for(type_name, env_struct, field) {
 				continue
 			}
 			if wrote_fields > 0 {
@@ -1781,7 +1835,7 @@ fn (mut g Gen) gen_init_expr(node ast.InitExpr) {
 				if initialized_fields[field.name] {
 					continue
 				}
-				if !struct_field_needs_explicit_default(field) {
+				if !g.struct_field_needs_explicit_default_for(type_name, env_struct, field) {
 					continue
 				}
 				if wrote_fields > 0 {

@@ -125,6 +125,9 @@ mut:
 	cached_scopes    map[string]&types.Scope
 	cached_methods   map[string][]&types.Fn
 	cached_fn_scopes map[string]&types.Scope
+	// Methods declared on runtime-generic receivers must stay as selector calls
+	// until C generation, where concrete receiver instances are available.
+	generic_receiver_methods map[string]bool
 	// Accumulated synth types for deferred application (thread-safe).
 	// Instead of writing directly to env.set_expr_type during parallel transform,
 	// store here and apply after merge.
@@ -231,6 +234,7 @@ pub fn Transformer.new_with_pref(files []ast.File, env &types.Environment, p &pr
 		static_local_renames:        map[string]string{}
 		decl_type_overrides:         map[string]types.Type{}
 		cur_import_aliases:          map[string]string{}
+		generic_receiver_methods:    map[string]bool{}
 		synth_types:                 map[int]types.Type{}
 	}
 	t.comptime_vmodroot = resolve_comptime_vmodroot(files, p)
@@ -257,6 +261,7 @@ pub fn (t &Transformer) new_worker_clone(worker_idx int) &Transformer {
 		cached_scopes:               t.cached_scopes
 		cached_methods:              t.cached_methods
 		cached_fn_scopes:            t.cached_fn_scopes
+		generic_receiver_methods:    t.generic_receiver_methods
 		synth_pos_counter:           -(worker_idx * 100_000)
 		needed_str_fns:              map[string]string{}
 		needed_clone_fns:            map[string]string{}
@@ -967,6 +972,106 @@ fn (t &Transformer) is_var_enum(name string) ?string {
 	return none
 }
 
+fn runtime_generic_receiver_base_name(expr ast.Expr) string {
+	match expr {
+		ast.Ident {
+			return expr.name.replace('.', '__')
+		}
+		ast.SelectorExpr {
+			if expr.lhs is ast.Ident {
+				return '${(expr.lhs as ast.Ident).name}__${expr.rhs.name}'
+			}
+			return expr.rhs.name
+		}
+		ast.GenericArgOrIndexExpr {
+			return runtime_generic_receiver_base_name(expr.lhs)
+		}
+		ast.GenericArgs {
+			return runtime_generic_receiver_base_name(expr.lhs)
+		}
+		ast.PrefixExpr {
+			return runtime_generic_receiver_base_name(expr.expr)
+		}
+		ast.ModifierExpr {
+			return runtime_generic_receiver_base_name(expr.expr)
+		}
+		ast.Type {
+			if expr is ast.GenericType {
+				return runtime_generic_receiver_base_name(expr.name)
+			}
+			if expr is ast.PointerType {
+				return runtime_generic_receiver_base_name(expr.base_type)
+			}
+		}
+		else {}
+	}
+
+	return ''
+}
+
+fn receiver_type_has_runtime_generic_param(expr ast.Expr) bool {
+	match expr {
+		ast.GenericArgOrIndexExpr {
+			return expr.expr !is ast.LifetimeExpr
+		}
+		ast.GenericArgs {
+			for arg in expr.args {
+				if arg !is ast.LifetimeExpr {
+					return true
+				}
+			}
+		}
+		ast.PrefixExpr {
+			return receiver_type_has_runtime_generic_param(expr.expr)
+		}
+		ast.ModifierExpr {
+			return receiver_type_has_runtime_generic_param(expr.expr)
+		}
+		ast.Type {
+			if expr is ast.GenericType {
+				for param in expr.params {
+					if param !is ast.LifetimeExpr {
+						return true
+					}
+				}
+			}
+			if expr is ast.PointerType {
+				return receiver_type_has_runtime_generic_param(expr.base_type)
+			}
+		}
+		else {}
+	}
+
+	return false
+}
+
+fn (mut t Transformer) collect_generic_receiver_methods(files []ast.File) {
+	mut methods := map[string]bool{}
+	for file in files {
+		for stmt in file.stmts {
+			if stmt is ast.FnDecl && stmt.is_method
+				&& receiver_type_has_runtime_generic_param(stmt.receiver.typ) {
+				base_name := runtime_generic_receiver_base_name(stmt.receiver.typ)
+				if base_name == '' {
+					continue
+				}
+				methods['${base_name}__${stmt.name}'] = true
+				short_name := if base_name.contains('__') {
+					base_name.all_after_last('__')
+				} else {
+					base_name
+				}
+				methods['${short_name}__${stmt.name}'] = true
+				if file.mod != '' && file.mod != 'main' && file.mod != 'builtin'
+					&& !base_name.contains('__') {
+					methods['${file.mod}__${base_name}__${stmt.name}'] = true
+				}
+			}
+		}
+	}
+	t.generic_receiver_methods = methods.clone()
+}
+
 // pre_pass runs the sequential pre-pass: builds elided_fns and collects runtime const inits.
 pub fn (mut t Transformer) pre_pass(files []ast.File) {
 	// Pre-pass: scan all function declarations for conditional compilation attributes
@@ -984,6 +1089,7 @@ pub fn (mut t Transformer) pre_pass(files []ast.File) {
 			}
 		}
 	}
+	t.collect_generic_receiver_methods(files)
 	// Pre-pass: collect const declarations that require runtime initialization.
 	if !t.is_eval_backend() {
 		t.collect_runtime_const_inits(files)
@@ -6438,6 +6544,14 @@ fn (mut t Transformer) extract_or_expr(expr ast.Expr, mut prefix_stmts []ast.Stm
 					return lowered
 				}
 			}
+			if expr.op == .amp && expr.expr is ast.PostfixExpr {
+				postfix := expr.expr as ast.PostfixExpr
+				if postfix.op == .question {
+					if lowered := t.try_expand_addr_of_option_unwrap(postfix, mut prefix_stmts) {
+						return lowered
+					}
+				}
+			}
 			if expr.op == .arrow && expr.expr is ast.OrExpr {
 				or_expr := expr.expr as ast.OrExpr
 				rewritten_or := ast.OrExpr{
@@ -6535,6 +6649,65 @@ fn (mut t Transformer) extract_or_expr(expr ast.Expr, mut prefix_stmts []ast.Stm
 			return expr
 		}
 	}
+}
+
+fn addr_of_option_unwrap_can_borrow(expr ast.Expr) bool {
+	return match expr {
+		ast.Ident {
+			true
+		}
+		ast.SelectorExpr {
+			addr_of_option_unwrap_can_borrow(expr.lhs)
+		}
+		ast.ParenExpr {
+			addr_of_option_unwrap_can_borrow(expr.expr)
+		}
+		ast.PrefixExpr {
+			expr.op == .mul && addr_of_option_unwrap_can_borrow(expr.expr)
+		}
+		else {
+			false
+		}
+	}
+}
+
+fn (mut t Transformer) try_expand_addr_of_option_unwrap(postfix ast.PostfixExpr, mut prefix_stmts []ast.Stmt) ?ast.Expr {
+	wrapper_type := t.expr_wrapper_type_for_or(postfix.expr) or { return none }
+	if wrapper_type !is types.OptionType {
+		return none
+	}
+	option_type := wrapper_type as types.OptionType
+	if !addr_of_option_unwrap_can_borrow(postfix.expr) {
+		return none
+	}
+	wrapper_expr := t.transform_expr(postfix.expr)
+	state_check := ast.Expr(ast.InfixExpr{
+		op:  .ne
+		lhs: t.synth_selector(wrapper_expr, 'state', types.Type(types.int_))
+		rhs: ast.BasicLiteral{
+			kind:  .number
+			value: '0'
+		}
+	})
+	or_stmts := [
+		ast.Stmt(ast.ReturnStmt{
+			exprs: [ast.Expr(ast.Ident{
+				name: 'none'
+			})]
+		}),
+	]
+	prefix_stmts << ast.Stmt(ast.ExprStmt{
+		expr: ast.IfExpr{
+			cond:  state_check
+			stmts: t.transform_stmts(or_stmts)
+		}
+	})
+	data_expr := t.synth_selector(wrapper_expr, 'data', option_type.base_type)
+	return ast.Expr(ast.PrefixExpr{
+		op:   .amp
+		expr: data_expr
+		pos:  postfix.pos
+	})
 }
 
 // expand_single_or_expr expands a single OrExpr and returns the data access expression

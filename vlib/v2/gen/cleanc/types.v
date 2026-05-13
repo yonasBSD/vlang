@@ -22,6 +22,18 @@ fn option_value_type(option_type string) string {
 	return unmangle_c_ptr_type(option_type['_option_'.len..])
 }
 
+fn legacy_fixed_array_elem_type(name string) string {
+	if !name.starts_with('fixed_') {
+		return ''
+	}
+	rest := name['fixed_'.len..]
+	last_underscore := rest.last_index('_') or { -1 }
+	if last_underscore <= 0 {
+		return ''
+	}
+	return rest[..last_underscore]
+}
+
 fn (g &Gen) resolve_active_generic_type(name string) ?types.Type {
 	if name == '' || g.active_generic_types.len == 0 {
 		return none
@@ -1041,6 +1053,10 @@ fn (mut g Gen) eq_expr_for_c_type(c_type string, va string, vb string) string {
 		|| c_type.ends_with('ptr') || g.is_enum_type(c_type) {
 		return '${va} == ${vb}'
 	}
+	struct_type := g.lookup_struct_type_by_c_name(c_type)
+	if struct_type.fields.len > 0 {
+		return g.gen_struct_field_eq_expr(struct_type, va, vb)
+	}
 	return 'memcmp(&${va}, &${vb}, sizeof(${c_type})) == 0'
 }
 
@@ -1057,15 +1073,10 @@ fn (mut g Gen) eq_expr_for_type(typ types.Type, va string, vb string) string {
 			return g.eq_expr_for_c_type(c_type, va, vb)
 		}
 		types.Alias {
-			match typ.base_type {
-				types.String, types.Array, types.Map {
-					return g.eq_expr_for_type(typ.base_type, va, vb)
-				}
-				else {}
-			}
-
-			c_type := g.types_type_to_c(typ)
-			return g.eq_expr_for_c_type(c_type, va, vb)
+			return g.eq_expr_for_type(typ.base_type, va, vb)
+		}
+		types.Struct {
+			return g.gen_struct_field_eq_expr(typ, va, vb)
 		}
 		types.Primitive, types.Pointer, types.Rune, types.Char, types.ISize, types.USize,
 		types.Enum, types.Nil {
@@ -1083,7 +1094,8 @@ fn (mut g Gen) eq_expr_for_type(typ types.Type, va string, vb string) string {
 fn (mut g Gen) gen_struct_field_eq_expr(s types.Struct, va string, vb string) string {
 	mut parts := []string{}
 	for field in s.fields {
-		parts << g.eq_expr_for_type(field.typ, '${va}.${field.name}', '${vb}.${field.name}')
+		field_name := escape_c_keyword(field.name)
+		parts << g.eq_expr_for_type(field.typ, '${va}.${field_name}', '${vb}.${field_name}')
 	}
 	if parts.len == 0 {
 		return '1'
@@ -1109,6 +1121,12 @@ fn (mut g Gen) method_receiver_base_type(expr ast.Expr) string {
 			if base != '' && base != 'int' {
 				return base
 			}
+		}
+	}
+	if expr is ast.CallExpr || expr is ast.CallOrCastExpr {
+		call_type := g.get_expr_type(expr).trim_right('*')
+		if call_type != '' && call_type != 'int' {
+			return call_type
 		}
 	}
 	// Fast path: env pos.id O(1) lookup (covers most non-Ident receivers).
@@ -1959,6 +1977,12 @@ fn (mut g Gen) get_expr_type(node ast.Expr) string {
 	}
 	// Try environment lookup
 	if t := g.get_expr_type_from_env(node) {
+		if node is ast.IndexExpr || node is ast.InfixExpr {
+			elem_type := legacy_fixed_array_elem_type(t)
+			if elem_type != '' {
+				return elem_type
+			}
+		}
 		if node is ast.SelectorExpr {
 			field_type_from_cast := g.selector_explicit_cast_field_type(node)
 			if field_type_from_cast != '' {
@@ -2095,6 +2119,11 @@ fn (mut g Gen) get_expr_type(node ast.Expr) string {
 			numeric_type := g.infer_numeric_expr_type(node)
 			if numeric_type != '' && numeric_type !in ['int', 'int_literal'] {
 				return numeric_type
+			}
+		} else if t == 'int' && node is ast.IndexExpr {
+			elem_type := g.infer_array_elem_type_from_expr(node.lhs)
+			if elem_type != '' && elem_type != 'array' && elem_type != 'int' {
+				return elem_type
 			}
 		} else if node is ast.SelectorExpr && g.active_generic_types.len > 0 {
 			// In specialized generic functions, the env may return the
@@ -2902,6 +2931,88 @@ fn (mut g Gen) resolve_generic_struct_c_name(base_name string, concrete_params [
 		}
 	}
 	return base_name
+}
+
+fn (mut g Gen) generic_runtime_param_key_from_expr(expr ast.Expr) string {
+	match expr {
+		ast.GenericArgs {
+			base_name := g.expr_type_to_c(expr.lhs)
+			runtime_args := runtime_generic_args(expr.args)
+			if runtime_args.len == 0 {
+				return base_name
+			}
+			return '${base_name}_T_${g.generic_runtime_param_key_from_exprs(runtime_args)}'
+		}
+		ast.GenericArgOrIndexExpr {
+			base_name := g.expr_type_to_c(expr.lhs)
+			if expr.expr is ast.LifetimeExpr {
+				return base_name
+			}
+			return '${base_name}_T_${g.generic_runtime_param_key_from_expr(expr.expr)}'
+		}
+		ast.Type {
+			if expr is ast.GenericType {
+				base_name := g.expr_type_to_c(expr.name)
+				runtime_args := runtime_generic_args(expr.params)
+				if runtime_args.len == 0 {
+					return base_name
+				}
+				return '${base_name}_T_${g.generic_runtime_param_key_from_exprs(runtime_args)}'
+			}
+			return g.expr_type_to_c(expr)
+		}
+		else {
+			return g.expr_type_to_c(expr)
+		}
+	}
+}
+
+fn (mut g Gen) generic_runtime_param_key_from_exprs(params []ast.Expr) string {
+	mut param_c_names := []string{cap: params.len}
+	for param in runtime_generic_args(params) {
+		param_c_names << g.generic_runtime_param_key_from_expr(param)
+	}
+	return param_c_names.join('_')
+}
+
+fn (mut g Gen) specialized_generic_c_name_for_key(base_name string, key string, fallback string) string {
+	for inst in g.generic_struct_instances[base_name] {
+		if inst.params_key == key {
+			return inst.c_name
+		}
+	}
+	if key != '' && g.cur_fn_ret_type == '${base_name}_T_${key}' {
+		return g.cur_fn_ret_type
+	}
+	if fallback != '' && g.cur_fn_ret_type.starts_with('${fallback}_T_') {
+		return g.cur_fn_ret_type
+	}
+	return fallback
+}
+
+fn (mut g Gen) specialized_generic_c_name_from_type_expr(type_expr ast.Expr, fallback string) string {
+	match type_expr {
+		ast.GenericArgs {
+			base_name := g.expr_type_to_c(type_expr.lhs)
+			key := g.generic_runtime_param_key_from_exprs(type_expr.args)
+			return g.specialized_generic_c_name_for_key(base_name, key, fallback)
+		}
+		ast.GenericArgOrIndexExpr {
+			base_name := g.expr_type_to_c(type_expr.lhs)
+			key := g.generic_runtime_param_key_from_expr(type_expr.expr)
+			return g.specialized_generic_c_name_for_key(base_name, key, fallback)
+		}
+		ast.Type {
+			if type_expr is ast.GenericType {
+				base_name := g.expr_type_to_c(type_expr.name)
+				key := g.generic_runtime_param_key_from_exprs(type_expr.params)
+				return g.specialized_generic_c_name_for_key(base_name, key, fallback)
+			}
+		}
+		else {}
+	}
+
+	return fallback
 }
 
 // emit_late_generic_struct generates a struct definition for a non-primary generic

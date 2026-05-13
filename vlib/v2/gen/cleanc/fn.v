@@ -768,7 +768,9 @@ fn (mut g Gen) get_all_receiver_generic_bindings(node ast.FnDecl) []map[string]t
 	if instances := g.generic_struct_instances[struct_name] {
 		if instances.len > 0 {
 			mut all_bindings := []map[string]types.Type{cap: instances.len}
-			all_bindings << g.primary_generic_struct_instance(struct_name, instances).bindings
+			for inst in instances {
+				all_bindings << inst.bindings.clone()
+			}
 			return all_bindings
 		}
 	}
@@ -777,7 +779,9 @@ fn (mut g Gen) get_all_receiver_generic_bindings(node ast.FnDecl) []map[string]t
 		if instances := g.generic_struct_instances[recv_c_name] {
 			if instances.len > 0 {
 				mut all_bindings := []map[string]types.Type{cap: instances.len}
-				all_bindings << g.primary_generic_struct_instance(recv_c_name, instances).bindings
+				for inst in instances {
+					all_bindings << inst.bindings.clone()
+				}
 				return all_bindings
 			}
 		}
@@ -1583,9 +1587,6 @@ fn (mut g Gen) gen_fn_decl(node ast.FnDecl) {
 }
 
 fn (mut g Gen) gen_fn_decl_ptr(node &ast.FnDecl) {
-	if !g.should_emit_fn_decl(g.cur_module, *node) {
-		return
-	}
 	// All other functions are resolved from the host executable.
 	if g.pref != unsafe { nil } && g.pref.is_shared_lib {
 		if !node.attributes.has('live') {
@@ -1601,6 +1602,31 @@ fn (mut g Gen) gen_fn_decl_ptr(node &ast.FnDecl) {
 		return
 	}
 	if node.language == .c && node.stmts.len == 0 {
+		return
+	}
+	if g.generic_fn_param_names(*node).len > 0 {
+		// maxof[T]/minof[T] are compile-time functions fully inlined by the transformer.
+		// Skip emitting stub bodies (which contain invalid C).
+		if node.name in ['maxof', 'minof'] {
+			return
+		}
+		prev_generic_types := g.active_generic_types.clone()
+		prev_generic_c_names := g.active_generic_c_names.clone()
+		specs := g.generic_fn_specializations(*node)
+		if specs.len > 0 {
+			for spec in specs {
+				g.active_generic_types = spec.generic_types.clone()
+				g.active_generic_c_names = g.generic_c_names_for_bindings(spec.generic_types)
+				g.gen_fn_decl_with_name_ptr(node, spec.name)
+			}
+			g.active_generic_types = prev_generic_types.clone()
+			g.active_generic_c_names = prev_generic_c_names.clone()
+			return
+		}
+		g.active_generic_types = prev_generic_types.clone()
+		g.active_generic_c_names = prev_generic_c_names.clone()
+	}
+	if !g.should_emit_fn_decl(g.cur_module, *node) {
 		return
 	}
 	// eventbus module: all generic struct methods use T = string.
@@ -1630,21 +1656,6 @@ fn (mut g Gen) gen_fn_decl_ptr(node &ast.FnDecl) {
 		g.active_generic_types = prev_generic_types.clone()
 	}
 	if g.generic_fn_param_names(*node).len > 0 {
-		// maxof[T]/minof[T] are compile-time functions fully inlined by the transformer.
-		// Skip emitting stub bodies (which contain invalid C).
-		if node.name in ['maxof', 'minof'] {
-			return
-		}
-		prev_generic_types := g.active_generic_types.clone()
-		prev_generic_c_names := g.active_generic_c_names.clone()
-		specs := g.generic_fn_specializations(*node)
-		for spec in specs {
-			g.active_generic_types = spec.generic_types.clone()
-			g.active_generic_c_names = g.generic_c_names_for_bindings(spec.generic_types)
-			g.gen_fn_decl_with_name_ptr(node, spec.name)
-		}
-		g.active_generic_types = prev_generic_types.clone()
-		g.active_generic_c_names = prev_generic_c_names.clone()
 		return
 	}
 
@@ -1695,6 +1706,14 @@ fn (mut g Gen) gen_fn_decl_with_name(node ast.FnDecl, fn_name string) {
 	g.gen_fn_decl_with_name_ptr(&node, fn_name)
 }
 
+fn (mut g Gen) undef_possible_str_macro(fn_name string) {
+	if fn_name.ends_with('__str') || fn_name.ends_with('_str') {
+		g.sb.writeln('#ifdef ${fn_name}')
+		g.sb.writeln('#undef ${fn_name}')
+		g.sb.writeln('#endif')
+	}
+}
+
 // Keep pass 5 on pointer-based FnDecl access; large by-value copies here
 // corrupt the self-hosted cleanc caller after the first emitted body.
 fn (mut g Gen) gen_fn_decl_with_name_ptr(node &ast.FnDecl, fn_name string) {
@@ -1729,6 +1748,16 @@ fn (mut g Gen) gen_fn_decl_with_name_ptr(node &ast.FnDecl, fn_name string) {
 		g.expr_type_to_c(node.typ.return_type)
 	} else {
 		'void'
+	}
+	if !is_c_main && node.typ.return_type !is ast.EmptyExpr {
+		mut declared_ret_type := g.expr_type_to_c(node.typ.return_type)
+		declared_ret_type = g.specialized_generic_c_name_from_type_expr(node.typ.return_type,
+			declared_ret_type)
+		if declared_ret_type != '' && declared_ret_type != 'void' && (g.cur_fn_ret_type == ''
+			|| g.cur_fn_ret_type == 'int'
+			|| declared_ret_type.starts_with('${g.cur_fn_ret_type}_T_')) {
+			g.cur_fn_ret_type = declared_ret_type
+		}
 	}
 	g.cur_fn_ret_type = normalize_signature_type_name(g.cur_fn_ret_type, 'void')
 	g.cur_fn_c_ret_type = g.c_fn_return_type_from_v(g.cur_fn_ret_type)
@@ -1847,6 +1876,7 @@ fn (mut g Gen) gen_fn_decl_with_name_ptr(node &ast.FnDecl, fn_name string) {
 	is_live_fn := !is_c_main && node.attributes.has('live')
 
 	// Generate function header (with impl_live_ prefix for @[live] functions)
+	g.undef_possible_str_macro(fn_name)
 	if is_live_fn {
 		g.gen_fn_head_live_ptr(node, fn_name)
 	} else {
@@ -3275,6 +3305,7 @@ fn (mut g Gen) resolve_container_method_name(receiver ast.Expr, method_name stri
 }
 
 fn (mut g Gen) resolve_call_name(lhs ast.Expr, arg_count int) string {
+	_ = arg_count
 	mut name := ''
 	if lhs is ast.Ident {
 		name = sanitize_fn_ident(lhs.name)
@@ -4731,6 +4762,13 @@ fn (mut g Gen) call_expr(lhs ast.Expr, args []ast.Expr) {
 					g.sb.write_string('(*')
 					g.sb.write_string(arg_ident_name)
 					g.sb.write_string(')')
+					continue
+				}
+			}
+			if c_name == 'new_array_from_c_array' && i == 2 && call_args.len >= 4 {
+				elem_type := g.array_init_elem_type_from_expr(call_args[3])
+				if elem_type != '' && elem_type != 'int' && elem_type != 'array' {
+					g.sb.write_string('sizeof(${elem_type})')
 					continue
 				}
 			}

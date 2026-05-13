@@ -391,7 +391,11 @@ fn (mut g Gen) gen_stmt(node ast.Stmt) {
 			if node.op == .key_break {
 				g.sb.writeln('break;')
 			} else if node.op == .key_continue {
-				g.sb.writeln('continue;')
+				if g.comptime_continue_label != '' && g.runtime_loop_depth == 0 {
+					g.sb.writeln('goto ${g.comptime_continue_label};')
+				} else {
+					g.sb.writeln('continue;')
+				}
 			} else if node.op == .key_goto {
 				g.sb.writeln('goto ${node.label};')
 			}
@@ -485,6 +489,36 @@ fn (mut g Gen) gen_comptime_stmt(node ast.ComptimeStmt) {
 	g.sb.writeln('/* [TODO] ComptimeStmt */')
 }
 
+fn comptime_attr_value_string(expr ast.Expr) string {
+	match expr {
+		ast.BasicLiteral {
+			return expr.value.trim('\'"')
+		}
+		ast.StringLiteral {
+			return expr.value
+		}
+		ast.Ident {
+			return expr.name
+		}
+		else {
+			return expr.name().trim('\'"')
+		}
+	}
+}
+
+fn comptime_attr_strings(attrs []ast.Attribute) []string {
+	mut out := []string{cap: attrs.len}
+	for attr in attrs {
+		value := comptime_attr_value_string(attr.value)
+		if attr.name != '' {
+			out << '${attr.name}: ${value}'
+		} else if value != '' {
+			out << value
+		}
+	}
+	return out
+}
+
 fn (mut g Gen) gen_comptime_if_stmt(node ast.IfExpr) {
 	result := g.eval_comptime_cond(node.cond)
 	if os.getenv('V2_DEBUG_COMPTIME') != '' {
@@ -537,6 +571,13 @@ fn (mut g Gen) gen_comptime_for(node ast.ForStmt) {
 		return
 	}
 	struct_type := concrete as types.Struct
+	mut attrs_by_field := map[string][]string{}
+	struct_c_name := g.types_type_to_c(concrete)
+	if decl_info := g.find_struct_decl_info_by_c_name(struct_c_name) {
+		for ast_field in decl_info.decl.fields {
+			attrs_by_field[ast_field.name] = comptime_attr_strings(ast_field.attributes)
+		}
+	}
 	field_var := for_in.value.name()
 	// Save comptime state
 	prev_field_var := g.comptime_field_var
@@ -545,21 +586,28 @@ fn (mut g Gen) gen_comptime_for(node ast.ForStmt) {
 	prev_field_raw_type := g.comptime_field_raw_type
 	prev_field_attrs := g.comptime_field_attrs
 	prev_field_idx := g.comptime_field_idx
+	prev_continue_label := g.comptime_continue_label
+	continue_base := g.tmp_counter
+	g.tmp_counter++
 	g.comptime_field_var = field_var
 	g.write_indent()
 	g.sb.writeln('{ /* comptime for ${field_var} in ${type_name}.fields */')
 	g.indent++
 	for i, field in struct_type.fields {
+		continue_label := '__v_ctf_continue_${continue_base}_${i}'
 		g.comptime_field_name = field.name
 		g.comptime_field_type = g.types_type_to_c(field.typ)
 		g.comptime_field_raw_type = field.typ
-		g.comptime_field_attrs = []
+		g.comptime_field_attrs = attrs_by_field[field.name] or { []string{} }
 		g.comptime_field_idx = i
+		g.comptime_continue_label = continue_label
 		g.write_indent()
 		g.sb.writeln('{ /* field ${i}: ${field.name} */')
 		g.indent++
 		// Use ForStmt.stmts for the loop body
 		g.gen_stmts(node.stmts)
+		g.write_indent()
+		g.sb.writeln('${continue_label}:;')
 		g.indent--
 		g.write_indent()
 		g.sb.writeln('}')
@@ -574,4 +622,5 @@ fn (mut g Gen) gen_comptime_for(node ast.ForStmt) {
 	g.comptime_field_raw_type = prev_field_raw_type
 	g.comptime_field_attrs = prev_field_attrs
 	g.comptime_field_idx = prev_field_idx
+	g.comptime_continue_label = prev_continue_label
 }

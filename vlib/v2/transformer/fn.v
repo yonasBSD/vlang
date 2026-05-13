@@ -132,6 +132,13 @@ fn (t &Transformer) expr_wrapper_type_for_or(expr ast.Expr) ?types.Type {
 	if wrapper_type := t.channel_receive_wrapper_type(expr) {
 		return wrapper_type
 	}
+	if expr is ast.SelectorExpr {
+		if field_type := t.get_struct_field_type(expr) {
+			if field_type is types.OptionType || field_type is types.ResultType {
+				return field_type
+			}
+		}
+	}
 	if ret_type := t.resolve_call_return_type(expr) {
 		if ret_type is types.OptionType || ret_type is types.ResultType {
 			return ret_type
@@ -995,11 +1002,20 @@ fn normalize_blank_fn_parameters(decl ast.FnDecl) ast.FnDecl {
 	}
 }
 
+fn fn_decl_has_runtime_generic_params(decl ast.FnDecl) bool {
+	for param in decl.typ.generic_params {
+		if param !is ast.LifetimeExpr {
+			return true
+		}
+	}
+	return false
+}
+
 fn (mut t Transformer) transform_fn_decl(input_decl ast.FnDecl) ast.FnDecl {
 	decl := normalize_blank_fn_parameters(input_decl)
 	// Skip uninstantiated generic functions - their bodies were never type-checked
 	// and they will never be called, so emit an empty body.
-	if decl.typ.generic_params.len > 0 {
+	if fn_decl_has_runtime_generic_params(decl) {
 		mut has_generic_types := decl.name in t.env.generic_types
 		if !has_generic_types {
 			for key, _ in t.env.generic_types {
@@ -1841,6 +1857,9 @@ fn (mut t Transformer) transform_call_expr(expr ast.CallExpr) ast.Expr {
 			}
 		}
 		if !is_module_call {
+			if t.receiver_method_has_runtime_generic_params(sel.lhs, sel.rhs.name) {
+				return t.keep_generic_receiver_method_call(sel, expr.args, expr.pos)
+			}
 			if resolved := t.resolve_method_call_name(sel.lhs, sel.rhs.name) {
 				// Guard against misresolution: if the receiver is known to be a string
 				// (e.g., tos2() returns string), ensure string methods aren't resolved to
@@ -2559,6 +2578,51 @@ fn (t &Transformer) resolve_method_call_name(receiver ast.Expr, method_name stri
 		}
 	}
 	return none
+}
+
+fn (t &Transformer) receiver_method_has_runtime_generic_params(receiver ast.Expr, method_name string) bool {
+	mut recv_type_opt := t.get_expr_type(receiver)
+	if recv_type_opt == none && receiver is ast.SelectorExpr {
+		recv_type_opt = t.get_struct_field_type(receiver)
+	}
+	recv_type := recv_type_opt or { return false }
+	base_type := t.unwrap_alias_and_pointer_type(recv_type)
+	if base_type !is types.Struct {
+		return false
+	}
+	type_name := base_type.name()
+	mut lookup_names := []string{cap: 4}
+	lookup_names << type_name
+	if type_name.contains('__') {
+		lookup_names << type_name.all_after_last('__')
+	} else if t.cur_module != '' && t.cur_module != 'main' {
+		lookup_names << '${t.cur_module}__${type_name}'
+	}
+	for name in lookup_names {
+		if t.generic_receiver_methods['${name}__${method_name}'] {
+			return true
+		}
+	}
+	return false
+}
+
+fn (mut t Transformer) keep_generic_receiver_method_call(sel ast.SelectorExpr, args []ast.Expr, pos token.Pos) ast.Expr {
+	call_args := t.lower_missing_call_args(ast.Expr(sel), args)
+	fn_info := t.lookup_call_fn_info(ast.Expr(sel))
+	mut transformed_args := []ast.Expr{cap: call_args.len}
+	for i, arg in call_args {
+		transformed_args << t.transform_call_arg_with_sumtype_check(arg, fn_info, i)
+	}
+	transformed_args = t.lower_variadic_args(ast.Expr(sel), transformed_args)
+	return ast.CallExpr{
+		lhs:  ast.SelectorExpr{
+			lhs: t.transform_expr(sel.lhs)
+			rhs: sel.rhs
+			pos: sel.pos
+		}
+		args: transformed_args
+		pos:  pos
+	}
 }
 
 fn (t &Transformer) resolve_array_concrete_method_name(receiver ast.Expr, method_name string) ?string {

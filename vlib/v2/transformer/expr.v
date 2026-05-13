@@ -2869,7 +2869,7 @@ fn (mut t Transformer) transform_infix_expr(expr ast.InfixExpr) ast.Expr {
 			return range_check
 		}
 		// Map membership: key in map -> map__exists(&map, &key)
-		if rhs_type := t.get_expr_type(expr.rhs) {
+		if rhs_type := t.resolve_expr_type(expr.rhs) {
 			if map_typ := t.unwrap_map_type(rhs_type) {
 				if t.is_eval_backend() {
 					return ast.InfixExpr{

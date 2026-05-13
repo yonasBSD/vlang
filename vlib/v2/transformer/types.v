@@ -3649,7 +3649,7 @@ fn (t &Transformer) normalize_array_type(array_type string) string {
 // get_map_type_for_expr returns the Map_K_V type string for an expression if it's a map.
 // Unwraps aliases and pointers (e.g., mut map parameters) before checking.
 fn (t &Transformer) get_map_type_for_expr(expr ast.Expr) ?string {
-	typ := t.get_expr_type(expr) or { return none }
+	typ := t.resolve_expr_type(expr) or { return none }
 	unwrapped := t.unwrap_alias_and_pointer_type(typ)
 	// Also unwrap aliases (unwrap_alias_and_pointer_type only handles pointers)
 	base := if unwrapped is types.Alias {
