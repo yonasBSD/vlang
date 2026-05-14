@@ -216,6 +216,176 @@ fn main() {
 	assert csrc.contains('int Mapper__helper_T_Schema(Mapper* m) {')
 }
 
+fn test_generate_c_specializes_implicit_generic_function_calls_from_all_args() {
+	csrc := generate_c_for_test('
+struct Left {}
+struct RightA {}
+struct RightB {}
+
+fn pair[T, U](x T, y U) int {
+	_ = x
+	_ = y
+	return 1
+}
+
+fn main() {
+	left := Left{}
+	a := RightA{}
+	b := RightB{}
+	_ = pair(left, a)
+	_ = pair(left, b)
+}
+')
+	assert csrc.contains('int pair_T_Left_RightA(Left x, RightA y);')
+	assert csrc.contains('int pair_T_Left_RightB(Left x, RightB y);')
+	assert csrc.contains('pair_T_Left_RightA(left, a)')
+	assert csrc.contains('pair_T_Left_RightB(left, b)')
+	assert !csrc.contains('pair(left, a)')
+	assert !csrc.contains('pair(left, b)')
+}
+
+fn test_generate_c_does_not_specialize_plain_generic_function_for_struct_fields() {
+	csrc := generate_c_for_test('
+enum Pattern {
+	a
+}
+
+struct Thing {
+	pattern Pattern
+	named bool
+}
+
+fn (thing Thing) find_at() int {
+	_ = thing
+	return 1
+}
+
+fn find[M](matcher M) int {
+	return matcher.find_at()
+}
+
+fn main() {
+	thing := Thing{}
+	_ = find(thing)
+}
+')
+	assert csrc.contains('int find_T_Thing(Thing matcher) {')
+	assert csrc.contains('return Thing__find_at((matcher));')
+	assert !csrc.contains('find_T_Pattern')
+	assert !csrc.contains('find_T_bool')
+	assert !csrc.contains('Pattern__find_at')
+	assert !csrc.contains('bool__find_at')
+}
+
+fn test_generate_c_specializes_nested_generic_calls_from_active_bindings() {
+	csrc := generate_c_for_test('
+struct Matcher {}
+struct Captures {}
+
+fn outer[M, T](matcher M, mut caps T) {
+	inner(matcher, mut caps)
+}
+
+fn inner[M, T](matcher M, mut caps T) {
+	_ = matcher
+	_ = caps
+}
+
+fn main() {
+	matcher := Matcher{}
+	mut caps := Captures{}
+	outer(matcher, mut caps)
+}
+')
+	assert csrc.contains('void outer_T_Matcher_Captures(Matcher matcher, Captures* caps) {')
+	assert csrc.contains('inner_T_Matcher_Captures(matcher, caps);')
+	assert csrc.contains('void inner_T_Matcher_Captures(Matcher matcher, Captures* caps) {')
+	assert !csrc.contains('inner(matcher, caps)')
+}
+
+fn test_generate_c_emits_value_receiver_methods_used_by_interface_wrappers() {
+	csrc := generate_c_for_test('
+interface Counter {
+	len() int
+}
+
+struct Counts {}
+
+fn (counts Counts) len() int {
+	_ = counts
+	return 1
+}
+
+fn use_counter(counter Counter) int {
+	return counter.len()
+}
+
+fn main() {
+	counts := Counts{}
+	_ = use_counter(counts)
+}
+')
+	assert csrc.contains('int Counts__len(Counts counts) {')
+	assert csrc.contains('static int __iface_wrap_Counter_Counts_len(void* _obj) {')
+	assert csrc.contains('return Counts__len(*(((Counts*)_obj)));')
+}
+
+fn test_generate_c_preserves_void_result_or_block_side_effects() {
+	csrc := generate_c_for_test('
+fn may_fail() ? {
+	return none
+}
+
+fn main() {
+	mut saw_error := false
+	may_fail() or {
+		saw_error = true
+	}
+	_ = saw_error
+}
+')
+	assert csrc.contains('saw_error = true;')
+}
+
+fn test_generate_c_passes_mut_generic_param_address_as_existing_pointer() {
+	csrc := generate_c_for_test('
+struct Captures {}
+
+fn visit[T](mut value T, cb fn (&T)) {
+	cb(&value)
+}
+
+fn main() {
+	mut captures := Captures{}
+	visit(mut captures, fn (_captures &Captures) {})
+}
+')
+	assert csrc.contains('cb(value);')
+	assert !csrc.contains('cb(&value);')
+}
+
+fn test_generate_c_captures_mut_param_as_existing_pointer() {
+	csrc := generate_c_for_test('
+fn touch(mut dst []u8) {
+	dst << u8(1)
+}
+
+fn outer(mut dst []u8) {
+	cb := fn [mut dst] () {
+		touch(mut dst)
+	}
+	cb()
+}
+
+fn main() {
+	mut dst := []u8{}
+	outer(mut dst)
+}
+')
+	assert csrc.contains('_capture_0 = dst;')
+	assert !csrc.contains('_capture_0 = &dst;')
+}
+
 fn test_generate_c_rewrites_continue_in_generic_comptime_field_loop() {
 	code := [
 		'struct Schema {',

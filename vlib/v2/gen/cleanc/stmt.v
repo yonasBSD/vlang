@@ -215,7 +215,8 @@ fn (mut g Gen) gen_stmt(node ast.Stmt) {
 				if (expr_type == '' || expr_type == 'int') && expr is ast.Ident {
 					expr_type = g.get_local_var_c_type(expr.name) or { expr_type }
 				}
-				if expr is ast.Ident && expr.name == 'err' {
+				if expr is ast.Ident && expr.name == 'err'
+					&& (expr_type == 'IError' || expr_type == 'builtin__IError') {
 					g.sb.write_string('return (${g.cur_fn_ret_type}){ .is_error=true, .err=')
 					g.expr(expr)
 					g.sb.writeln(' };')
@@ -284,10 +285,16 @@ fn (mut g Gen) gen_stmt(node ast.Stmt) {
 				}
 				// `return err` propagates the error from the or-block
 				if expr is ast.Ident && expr.name == 'err' {
-					g.sb.write_string('return (${g.cur_fn_ret_type}){ .is_error=true, .err=')
-					g.expr(expr)
-					g.sb.writeln(' };')
-					return
+					mut err_type := g.get_expr_type(expr)
+					if err_type == '' || err_type == 'int' {
+						err_type = g.get_local_var_c_type(expr.name) or { err_type }
+					}
+					if err_type == 'IError' || err_type == 'builtin__IError' {
+						g.sb.write_string('return (${g.cur_fn_ret_type}){ .is_error=true, .err=')
+						g.expr(expr)
+						g.sb.writeln(' };')
+						return
+					}
 				}
 				ierror_base := g.ierror_concrete_base_for_expr(expr)
 				if ierror_base != '' {

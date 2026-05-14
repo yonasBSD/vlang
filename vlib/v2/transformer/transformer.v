@@ -4847,6 +4847,9 @@ fn (mut t Transformer) expand_direct_or_expr_assign(stmt ast.AssignStmt, or_expr
 		// relying on later transform_stmt to avoid double smartcast transformation.
 		transformed_or_stmts := t.transform_stmts(or_expr.stmts)
 		if_stmts << transformed_or_stmts
+	} else if is_void_result {
+		transformed_or_stmts := t.transform_stmts(or_expr.stmts)
+		if_stmts << transformed_or_stmts
 	} else if is_result && t.cur_fn_returns_result
 		&& t.or_block_ends_with_error_value(or_expr.stmts) {
 		or_side_effect_stmts, or_value := t.get_or_block_stmts_and_value(or_expr.stmts)
@@ -7069,6 +7072,9 @@ fn (mut t Transformer) expand_single_or_expr(or_expr ast.OrExpr, mut prefix_stmt
 				rhs: [t.or_fallback_value_for_data(or_value, data_type)]
 			}
 		}
+	} else {
+		transformed_or_stmts := t.transform_stmts(or_expr.stmts)
+		if_stmts << transformed_or_stmts
 	}
 	prefix_stmts << ast.ExprStmt{
 		expr: ast.IfExpr{

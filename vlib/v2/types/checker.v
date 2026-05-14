@@ -4,6 +4,7 @@
 module types
 
 import time
+import strings
 import strconv
 import v2.ast
 import v2.errors
@@ -172,7 +173,15 @@ pub fn (e &Environment) lookup_method(type_name string, method_name string) ?FnT
 }
 
 pub fn (e &Environment) methods_for_type(type_name string) []&Fn {
-	return e.method_cache[type_name] or { []&Fn{} }
+	if methods := map_get_fns_by_string(e.method_cache, type_name) {
+		return methods
+	}
+	rlock e.methods {
+		if methods := map_get_fns_by_string(e.methods, type_name) {
+			return methods
+		}
+	}
+	return []&Fn{}
 }
 
 pub fn (mut e Environment) add_method_for_type(type_name string, method &Fn) {
@@ -233,12 +242,20 @@ pub fn (mut e Environment) set_fn_scope_by_key(key string, scope &Scope) {
 // get_fn_scope retrieves the scope for a function by its qualified name
 pub fn (e &Environment) get_fn_scope(module_name string, fn_name string) ?&Scope {
 	key := if module_name == '' { fn_name } else { '${module_name}__${fn_name}' }
-	return e.fn_scope_cache[key] or { return none }
+	return e.get_fn_scope_by_key(key)
 }
 
 // get_scope retrieves a module scope by exact module name.
 pub fn (e &Environment) get_scope(module_name string) ?&Scope {
-	return e.scope_cache[module_name] or { return none }
+	if scope := map_get_scope_by_string(e.scope_cache, module_name) {
+		return scope
+	}
+	rlock e.scopes {
+		if scope := map_get_scope_by_string(e.scopes, module_name) {
+			return scope
+		}
+	}
+	return none
 }
 
 // register_global adds or updates a module global in the type environment.
@@ -252,7 +269,39 @@ pub fn (mut e Environment) register_global(module_name string, name string, typ 
 
 // get_fn_scope_by_key retrieves a function scope by its fully-qualified key.
 pub fn (e &Environment) get_fn_scope_by_key(key string) ?&Scope {
-	return e.fn_scope_cache[key] or { return none }
+	if scope := map_get_scope_by_string(e.fn_scope_cache, key) {
+		return scope
+	}
+	rlock e.fn_scopes {
+		if scope := map_get_scope_by_string(e.fn_scopes, key) {
+			return scope
+		}
+	}
+	return none
+}
+
+fn map_get_scope_by_string(m map[string]&Scope, key string) ?&Scope {
+	if scope := m[key] {
+		return scope
+	}
+	for map_key, scope in m {
+		if map_key == key {
+			return scope
+		}
+	}
+	return none
+}
+
+fn map_get_fns_by_string(m map[string][]&Fn, key string) ?[]&Fn {
+	if methods := m[key] {
+		return methods
+	}
+	for map_key, methods in m {
+		if map_key == key {
+			return methods
+		}
+	}
+	return none
 }
 
 // snapshot_scopes returns a non-shared copy of the scopes map.
@@ -360,7 +409,6 @@ mut:
 	expecting_method bool
 	// Temporary recursion guard for debugging expression cycles.
 	expr_depth                int
-	expr_stack                []string
 	field_method_lookup_stack []string
 	// Whether we are inside an unsafe{} block
 	inside_unsafe bool
@@ -1082,12 +1130,13 @@ fn (c &Checker) for_in_value_type(iter_type Type) Type {
 
 fn (mut c Checker) expr(expr ast.Expr) Type {
 	c.expr_depth++
-	c.expr_stack << expr.name()
-	if c.expr_depth > 2000 {
-		start := if c.expr_stack.len > 40 { c.expr_stack.len - 40 } else { 0 }
+	if c.expr_depth > 50 {
 		eprintln('checker expr recursion depth=${c.expr_depth}')
-		for i := start; i < c.expr_stack.len; i++ {
-			eprintln('  ${c.expr_stack[i]}')
+		pos := expr.pos()
+		if pos.is_valid() {
+			file := c.file_set.file(pos)
+			position := file.position(pos)
+			eprintln('  at ${position.filename}:${position.line}:${position.column}')
 		}
 		panic('checker expr recursion')
 	}
@@ -1098,9 +1147,6 @@ fn (mut c Checker) expr(expr ast.Expr) Type {
 		c.env.set_expr_type(pos.id, typ)
 	}
 	c.expr_depth--
-	if c.expr_stack.len > 0 {
-		c.expr_stack.delete_last()
-	}
 	return typ
 }
 
@@ -4470,17 +4516,58 @@ fn (mut c Checker) unwrap_smartcast_expr(expr ast.Expr) ast.Expr {
 }
 
 fn smartcast_lookup_name(expr ast.Expr) string {
+	len := smartcast_lookup_name_len(expr)
+	if len <= 0 || len > 1024 {
+		return ''
+	}
+	mut sb := strings.new_builder(len)
+	write_smartcast_lookup_name(expr, mut sb, false)
+	return sb.str()
+}
+
+fn smartcast_lookup_name_len(expr ast.Expr) int {
 	match expr {
 		ast.AsCastExpr {
-			return smartcast_lookup_name(expr.expr)
+			return smartcast_lookup_name_len(expr.expr)
 		}
 		ast.SelectorExpr {
-			return smartcast_lookup_name(expr.lhs) + '.' + expr.rhs.name
+			lhs_len := smartcast_lookup_name_len(expr.lhs)
+			if lhs_len <= 0 || expr.rhs.name.len <= 0 || expr.rhs.name.len > 256 {
+				return 0
+			}
+			return lhs_len + 1 + expr.rhs.name.len
+		}
+		ast.Ident {
+			return if expr.name.len <= 256 { expr.name.len } else { 0 }
 		}
 		else {
-			return expr.name()
+			return 0
 		}
 	}
+}
+
+fn write_smartcast_lookup_name(expr ast.Expr, mut sb strings.Builder, wrote bool) bool {
+	mut did_write := wrote
+	match expr {
+		ast.AsCastExpr {
+			did_write = write_smartcast_lookup_name(expr.expr, mut sb, did_write)
+		}
+		ast.SelectorExpr {
+			did_write = write_smartcast_lookup_name(expr.lhs, mut sb, did_write)
+			if did_write {
+				sb.write_u8(`.`)
+			}
+			sb.write_string(expr.rhs.name)
+			did_write = true
+		}
+		ast.Ident {
+			sb.write_string(expr.name)
+			did_write = true
+		}
+		else {}
+	}
+
+	return did_write
 }
 
 // TODO:

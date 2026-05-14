@@ -2033,6 +2033,16 @@ fn (mut g Gen) expr(node ast.Expr) {
 				// the two operations cancel out. This avoids &(rvalue) errors when
 				// the deref gets null-guard expansion for sum type data pointers.
 				inner := g.unwrap_parens(node.expr)
+				if inner is ast.Ident {
+					source_type := g.get_expr_type(inner).trim_space()
+					if local_type := g.get_local_var_c_type(inner.name) {
+						if local_type.ends_with('*')
+							&& (inner.name in g.cur_fn_mut_params || !source_type.ends_with('*')) {
+							g.expr(inner)
+							return
+						}
+					}
+				}
 				if inner is ast.PrefixExpr && inner.op == .mul {
 					if g.expr_is_pointer(inner.expr) || g.expr_produces_pointer(inner.expr) {
 						g.expr(inner.expr)

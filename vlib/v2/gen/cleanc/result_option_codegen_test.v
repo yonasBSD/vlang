@@ -199,7 +199,7 @@ fn use(m Match[Item]) bool {
 ')
 	assert csrc.contains('typedef struct _option_sample__Item _option_sample__Item;')
 	assert csrc.contains('struct _option_sample__Item')
-	assert csrc.contains('_option_sample__Item sample__Match_T_sample__Item__inner')
+	assert csrc.contains('_option_sample__Item sample__Match__inner')
 }
 
 fn test_generate_c_emits_struct_str_function_when_interpolated() {
@@ -245,6 +245,36 @@ fn test_unused_error() {
 ')
 	assert !csrc.contains('string MyError__msg(MyError err)')
 	assert !csrc.contains('Term__str((err).term)')
+}
+
+fn test_generate_c_does_not_force_emit_unused_interface_candidate_method_body() {
+	csrc := generate_markused_c_for_test('
+interface Describer {
+	msg() string
+}
+
+struct Inner {
+	text string
+}
+
+fn (inner Inner) str() string {
+	return inner.text
+}
+
+struct ErrorLike {
+	inner Inner
+}
+
+fn (err ErrorLike) msg() string {
+	return err.inner.str()
+}
+
+fn main() {
+	_ = 1
+}
+')
+	assert !csrc.contains('string ErrorLike__msg(ErrorLike err)')
+	assert !csrc.contains('Inner__str((err).inner)')
 }
 
 fn test_generate_c_borrows_option_field_unwrap_payload_without_temp() {
