@@ -57,7 +57,6 @@ fn bytes_to_u64(b []u8) []u64 {
 
 // int_big creates a random `big.Integer` with range [0, n)
 // returns an error if `n` is 0 or negative.
-@[deprecated: 'use crypto.rand.bigint.int_big() instead']
 pub fn int_big(n big.Integer) !big.Integer {
 	if n.signum < 1 {
 		return error('`n` cannot be 0 or negative.')
