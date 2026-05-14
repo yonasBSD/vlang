@@ -3814,6 +3814,14 @@ fn (t &Transformer) type_to_c_name(typ types.Type) string {
 			val_c := t.type_to_c_name(typ.value_type)
 			return 'Map_${key_c}_${val_c}'
 		}
+		types.OptionType {
+			base_name := t.type_to_c_name(typ.base_type)
+			return '_option_${base_name}'
+		}
+		types.ResultType {
+			base_name := t.type_to_c_name(typ.base_type)
+			return '_result_${base_name}'
+		}
 		types.Tuple {
 			tuple_types := typ.get_types()
 			mut names := []string{cap: tuple_types.len}

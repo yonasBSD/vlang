@@ -1434,7 +1434,7 @@ fn (mut g Gen) struct_field_needs_explicit_default_for(struct_type string, env_s
 	return struct_field_needs_explicit_default(field)
 }
 
-fn (mut g Gen) write_struct_field_default_value(field types.Field) bool {
+fn (mut g Gen) write_struct_field_default_value(field types.Field, expected_type string) bool {
 	field_type := unwrap_alias_type(field.typ)
 	if field_type is types.Array {
 		array_type := field_type as types.Array
@@ -1447,6 +1447,9 @@ fn (mut g Gen) write_struct_field_default_value(field types.Field) bool {
 		return true
 	}
 	if field_type is types.OptionType {
+		if expected_type.starts_with('_option_') {
+			return g.gen_none_literal_for_type(expected_type)
+		}
 		return g.gen_none_literal_for_type(g.types_type_to_c(field_type))
 	}
 	return false
@@ -1620,6 +1623,8 @@ fn (mut g Gen) gen_init_expr(node ast.InitExpr) {
 			mut wrote_defaults := 0
 			g.sb.write_string('((${type_name}){')
 			for field in env_struct.fields {
+				expected_field_type := g.init_field_expected_type(type_name, env_struct,
+					field.name)
 				if !g.struct_field_needs_explicit_default_for(type_name, env_struct, field) {
 					continue
 				}
@@ -1627,7 +1632,7 @@ fn (mut g Gen) gen_init_expr(node ast.InitExpr) {
 					g.sb.write_string(',')
 				}
 				g.sb.write_string('.${escape_c_keyword(field.name)} = ')
-				if !g.write_struct_field_default_value(field) {
+				if !g.write_struct_field_default_value(field, expected_field_type) {
 					g.sb.write_string('0')
 				}
 				wrote_defaults++
@@ -1635,6 +1640,8 @@ fn (mut g Gen) gen_init_expr(node ast.InitExpr) {
 			for emb in env_struct.embedded {
 				emb_name := emb.name.all_after_last('__')
 				for field in emb.fields {
+					expected_field_type := g.init_field_expected_type(type_name, env_struct,
+						field.name)
 					if !g.struct_field_needs_explicit_default_for(type_name, env_struct, field) {
 						continue
 					}
@@ -1642,7 +1649,7 @@ fn (mut g Gen) gen_init_expr(node ast.InitExpr) {
 						g.sb.write_string(',')
 					}
 					g.sb.write_string('.${escape_c_keyword(emb_name)}.${escape_c_keyword(field.name)} = ')
-					if !g.write_struct_field_default_value(field) {
+					if !g.write_struct_field_default_value(field, expected_field_type) {
 						g.sb.write_string('0')
 					}
 					wrote_defaults++
@@ -1821,6 +1828,7 @@ fn (mut g Gen) gen_init_expr(node ast.InitExpr) {
 			if initialized_fields[field.name] {
 				continue
 			}
+			expected_field_type := g.init_field_expected_type(type_name, env_struct, field.name)
 			if !g.struct_field_needs_explicit_default_for(type_name, env_struct, field) {
 				continue
 			}
@@ -1828,7 +1836,7 @@ fn (mut g Gen) gen_init_expr(node ast.InitExpr) {
 				g.sb.write_string(',')
 			}
 			g.sb.write_string('.${escape_c_keyword(field.name)} = ')
-			if !g.write_struct_field_default_value(field) {
+			if !g.write_struct_field_default_value(field, expected_field_type) {
 				g.sb.write_string('0')
 			}
 			wrote_fields++
@@ -1840,6 +1848,8 @@ fn (mut g Gen) gen_init_expr(node ast.InitExpr) {
 				if initialized_fields[field.name] {
 					continue
 				}
+				expected_field_type := g.init_field_expected_type(type_name, env_struct,
+					field.name)
 				if !g.struct_field_needs_explicit_default_for(type_name, env_struct, field) {
 					continue
 				}
@@ -1847,7 +1857,7 @@ fn (mut g Gen) gen_init_expr(node ast.InitExpr) {
 					g.sb.write_string(',')
 				}
 				g.sb.write_string('.${escape_c_keyword(emb_name)}.${escape_c_keyword(field.name)} = ')
-				if !g.write_struct_field_default_value(field) {
+				if !g.write_struct_field_default_value(field, expected_field_type) {
 					g.sb.write_string('0')
 				}
 				wrote_fields++

@@ -1293,6 +1293,7 @@ pub fn (mut t Transformer) post_pass(mut result []ast.File) {
 		fn_scope_keys := t.cached_fn_scopes.keys()
 		for k in fn_scope_keys {
 			v := t.cached_fn_scopes[k] or { continue }
+			t.env.fn_scope_cache[k] = v
 			t.env.fn_scopes[k] = v
 		}
 	}
@@ -3822,6 +3823,10 @@ fn (t &Transformer) infer_decl_type_from_type_expr(expr ast.Expr) ?types.Type {
 				base_type: base_type
 			})
 		}
+		if type_expr is ast.GenericType {
+			generic_type := type_expr as ast.GenericType
+			return t.infer_generic_decl_type(generic_type)
+		}
 		if type_expr is ast.FnType {
 			mut param_types := []types.Type{cap: type_expr.params.len}
 			mut param_names := []string{cap: type_expr.params.len}
@@ -3921,6 +3926,72 @@ fn (t &Transformer) infer_decl_type_from_type_expr(expr ast.Expr) ?types.Type {
 		}
 	}
 	return none
+}
+
+fn (t &Transformer) infer_generic_decl_type(generic_type ast.GenericType) ?types.Type {
+	mut base_name := t.type_expr_name_full(generic_type.name)
+	if base_name == '' {
+		base_name = t.type_expr_to_c_name(generic_type.name)
+	}
+	if base_name == '' {
+		return none
+	}
+	base_type := t.lookup_type(base_name) or {
+		if base_name.contains('__') {
+			t.lookup_type(base_name.all_after_last('__')) or { return none }
+		} else {
+			return none
+		}
+	}
+	if base_type !is types.Struct {
+		return base_type
+	}
+	base_struct := base_type as types.Struct
+	if base_struct.generic_params.len == 0 {
+		return base_type
+	}
+	mut bindings := map[string]types.Type{}
+	mut arg_idx := 0
+	for generic_param in base_struct.generic_params {
+		if arg_idx >= generic_type.params.len {
+			break
+		}
+		arg_expr := generic_type.params[arg_idx]
+		arg_idx++
+		if generic_param.starts_with('^') || arg_expr is ast.LifetimeExpr {
+			continue
+		}
+		arg_type := t.infer_decl_type_from_type_expr(arg_expr) or { continue }
+		bindings[generic_param] = arg_type
+	}
+	if bindings.len == 0 {
+		return base_type
+	}
+	mut fields := []types.Field{cap: base_struct.fields.len}
+	for field in base_struct.fields {
+		fields << types.Field{
+			name:         field.name
+			typ:          substitute_transformer_generic_type(field.typ, bindings, 0)
+			default_expr: field.default_expr
+		}
+	}
+	mut embedded := []types.Struct{cap: base_struct.embedded.len}
+	for embedded_struct in base_struct.embedded {
+		embedded_type :=
+			substitute_transformer_generic_type(types.Type(embedded_struct), bindings, 0)
+		if embedded_type is types.Struct {
+			embedded << embedded_type
+		} else {
+			embedded << embedded_struct
+		}
+	}
+	return types.Type(types.Struct{
+		name:       base_struct.name
+		implements: base_struct.implements
+		fields:     fields
+		embedded:   embedded
+		is_soa:     base_struct.is_soa
+	})
 }
 
 fn (mut t Transformer) sumtype_name_for_assignment_lhs(expr ast.Expr) string {
@@ -11441,6 +11512,24 @@ fn (mut t Transformer) transform_array_init_with_exprs(arr ast.ArrayInitExpr, ex
 					elem_type_expr2 = ast.Expr(ast.Ident{
 						name: tn
 					})
+					if arr.exprs.len > 0 {
+						mut first_name := ''
+						if arr.exprs[0] is ast.InitExpr {
+							first_name = t.expr_to_type_name((arr.exprs[0] as ast.InitExpr).typ)
+						}
+						if first_name == '' {
+							if first_type := t.get_expr_type(arr.exprs[0]) {
+								first_name = t.type_to_c_name(first_type)
+							}
+						}
+						if tn.starts_with('Array_') && tn.ends_with('ptr') && first_name != ''
+							&& !first_name.starts_with('Array_') && !first_name.ends_with('*') {
+								elem_type_name = first_name
+								elem_type_expr2 = ast.Expr(ast.Ident{
+									name: first_name
+								})
+						}
+					}
 				}
 			}
 		}

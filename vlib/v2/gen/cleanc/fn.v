@@ -2810,6 +2810,13 @@ fn (mut g Gen) fn_return_type_to_c(t types.Type) string {
 }
 
 fn (mut g Gen) is_fn_pointer_expr(expr ast.Expr) bool {
+	if expr is ast.SelectorExpr {
+		lhs_type := g.get_raw_type(expr.lhs) or { return false }
+		field_type := selector_struct_field_type_from_type(lhs_type, expr.rhs.name) or {
+			return false
+		}
+		return extract_fn_type(field_type) != none
+	}
 	return g.fn_pointer_return_type(expr) != ''
 }
 
@@ -3620,9 +3627,11 @@ fn (mut g Gen) get_call_return_type(lhs ast.Expr, call_args []ast.Expr) ?string 
 			}
 		}
 		if allow_fn_ptr_lookup {
-			fn_ptr_ret := g.fn_pointer_return_type(lhs)
-			if fn_ptr_ret != '' {
-				return fn_ptr_ret
+			if g.is_fn_pointer_expr(lhs) {
+				fn_ptr_ret := g.fn_pointer_return_type(lhs)
+				if fn_ptr_ret != '' {
+					return fn_ptr_ret
+				}
 			}
 		}
 	}
@@ -3661,9 +3670,20 @@ fn (g &Gen) resolve_method_on_concrete_type(receiver_type string, method_name st
 		candidates << '${g.cur_module}__${clean_type}__${sanitized}'
 	}
 	for candidate in candidates {
-		if candidate in g.fn_return_types || candidate in g.fn_param_is_ptr {
+		if candidate in g.fn_return_types || candidate in g.fn_param_is_ptr
+			|| candidate in g.declared_fn_names {
 			return candidate
 		}
+	}
+	if generic_idx := clean_type.index('_T_') {
+		generic_base := clean_type[..generic_idx]
+		generic_base_candidate := '${generic_base}__${sanitized}'
+		if generic_base_candidate in g.fn_return_types
+			|| generic_base_candidate in g.fn_param_is_ptr
+			|| generic_base_candidate in g.declared_fn_names {
+			return candidates[0]
+		}
+		return candidates[0]
 	}
 	return none
 }
@@ -3882,6 +3902,65 @@ fn (mut g Gen) gen_array_contains_call(name string, call_args []ast.Expr) bool {
 	return true
 }
 
+fn (mut g Gen) try_gen_concrete_method_call(lhs ast.SelectorExpr, args []ast.Expr) bool {
+	if lhs.lhs is ast.Ident {
+		lhs_ident := lhs.lhs as ast.Ident
+		if lhs_ident.name == 'C' || g.is_type_name(lhs_ident.name)
+			|| g.is_module_ident(lhs_ident.name) {
+			return false
+		}
+	}
+	mut base_type := g.method_receiver_base_type(lhs.lhs)
+	base_type = strip_pointer_type_name(unmangle_c_ptr_type(base_type))
+	if base_type == '' || base_type == 'int' || g.is_interface_type(base_type) {
+		return false
+	}
+	method_name := sanitize_fn_ident(lhs.rhs.name)
+	mut method_c_name := ''
+	mut embedded_owner := ''
+	if concrete_method := g.resolve_method_on_concrete_type(base_type, method_name) {
+		method_c_name = concrete_method
+	} else if embedded := g.resolve_method_on_embedded_receiver(base_type, method_name) {
+		method_c_name = embedded.method_c_name
+		embedded_owner = embedded.owner
+	} else {
+		return false
+	}
+	ptr_params := g.fn_param_is_ptr[method_c_name] or { []bool{} }
+	receiver_as_ptr := ptr_params.len > 0 && ptr_params[0]
+	receiver_type := g.get_expr_type(lhs.lhs)
+	receiver_is_ptr := receiver_type.ends_with('*')
+	g.called_fn_names[method_c_name] = true
+	g.sb.write_string('${method_c_name}(')
+	if embedded_owner != '' {
+		if receiver_as_ptr {
+			g.sb.write_string('&(')
+			g.expr(lhs.lhs)
+			g.sb.write_string(').${embedded_owner}')
+		} else {
+			g.sb.write_string('(')
+			g.expr(lhs.lhs)
+			g.sb.write_string(').${embedded_owner}')
+		}
+	} else if receiver_as_ptr && !receiver_is_ptr {
+		g.sb.write_string('&(')
+		g.expr(lhs.lhs)
+		g.sb.write_string(')')
+	} else if !receiver_as_ptr && receiver_is_ptr {
+		g.sb.write_string('*(')
+		g.expr(lhs.lhs)
+		g.sb.write_string(')')
+	} else {
+		g.expr(lhs.lhs)
+	}
+	for i in 0 .. args.len {
+		g.sb.write_string(', ')
+		g.gen_call_arg(method_c_name, i + 1, args[i])
+	}
+	g.sb.write_string(')')
+	return true
+}
+
 fn (mut g Gen) call_expr(lhs ast.Expr, args []ast.Expr) {
 	for i in 0 .. args.len {
 		_ = g.get_expr_type(args[i])
@@ -3902,6 +3981,11 @@ fn (mut g Gen) call_expr(lhs ast.Expr, args []ast.Expr) {
 				g.sb.write_string('false')
 				return
 			}
+		}
+	}
+	if lhs is ast.SelectorExpr {
+		if g.try_gen_concrete_method_call(lhs, args) {
+			return
 		}
 	}
 	if lhs is ast.SelectorExpr {
@@ -4993,9 +5077,7 @@ fn (mut g Gen) ensure_cur_fn_scope() ?&types.Scope {
 	}
 	suffix := '__${g.cur_fn_name}'
 	mut matched_key := ''
-	fn_scope_keys := lock g.env.fn_scopes {
-		g.env.fn_scopes.keys()
-	}
+	fn_scope_keys := g.env.snapshot_fn_scopes().keys()
 	for key in fn_scope_keys {
 		if key.ends_with(suffix) {
 			matched_key = key

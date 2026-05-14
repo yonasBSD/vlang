@@ -22,6 +22,9 @@ pub mut:
 	// types map[int]Type
 	// methods - shared for parallel type checking
 	methods           shared map[string][]&Fn = map[string][]&Fn{}
+	scope_cache       map[string]&Scope
+	fn_scope_cache    map[string]&Scope
+	method_cache      map[string][]&Fn
 	generic_types     map[string][]map[string]Type
 	cur_generic_types []map[string]Type
 	// Expression types - indexed directly by pos.id.
@@ -33,6 +36,12 @@ pub mut:
 
 pub fn Environment.new() &Environment {
 	return &Environment{
+		scopes:           map[string]&Scope{}
+		fn_scopes:        map[string]&Scope{}
+		methods:          map[string][]&Fn{}
+		scope_cache:      map[string]&Scope{}
+		fn_scope_cache:   map[string]&Scope{}
+		method_cache:     map[string][]&Fn{}
 		expr_type_values: []Type{cap: 100_000}
 	}
 }
@@ -150,12 +159,7 @@ fn is_embed_file_call_expr(expr ast.Expr) bool {
 // lookup_method looks up a method by receiver type name and method name
 // Returns the method's FnType if found
 pub fn (e &Environment) lookup_method(type_name string, method_name string) ?FnType {
-	mut methods := []&Fn{}
-	rlock e.methods {
-		if type_name in e.methods {
-			methods = unsafe { e.methods[type_name] }
-		}
-	}
+	methods := e.methods_for_type(type_name)
 	for method in methods {
 		if method.get_name() == method_name {
 			typ := method.get_typ()
@@ -167,20 +171,23 @@ pub fn (e &Environment) lookup_method(type_name string, method_name string) ?FnT
 	return none
 }
 
+pub fn (e &Environment) methods_for_type(type_name string) []&Fn {
+	return e.method_cache[type_name] or { []&Fn{} }
+}
+
+pub fn (mut e Environment) add_method_for_type(type_name string, method &Fn) {
+	mut methods_for_type := e.method_cache[type_name] or { []&Fn{} }
+	methods_for_type << method
+	e.method_cache[type_name] = methods_for_type
+	lock e.methods {
+		e.methods[type_name] = methods_for_type
+	}
+}
+
 // lookup_fn looks up a function by module and name in the environment's scopes
 // Returns the function's FnType if found
 pub fn (e &Environment) lookup_fn(module_name string, fn_name string) ?FnType {
-	mut scope := &Scope(unsafe { nil })
-	mut found_scope := false
-	lock e.scopes {
-		if module_name in e.scopes {
-			scope = unsafe { e.scopes[module_name] }
-			found_scope = true
-		}
-	}
-	if !found_scope {
-		return none
-	}
+	scope := e.scope_cache[module_name] or { return none }
 	if obj := scope.lookup_parent(fn_name, 0) {
 		if obj is Fn {
 			typ := obj.get_typ()
@@ -205,6 +212,7 @@ pub fn (e &Environment) lookup_local_var(scope &Scope, name string) ?Type {
 // set_fn_scope stores the scope for a function by its qualified name
 pub fn (mut e Environment) set_fn_scope(module_name string, fn_name string, scope &Scope) {
 	key := if module_name == '' { fn_name } else { '${module_name}__${fn_name}' }
+	e.fn_scope_cache[key] = scope
 	lock e.fn_scopes {
 		e.fn_scopes[key] = scope
 	}
@@ -213,49 +221,17 @@ pub fn (mut e Environment) set_fn_scope(module_name string, fn_name string, scop
 // get_fn_scope retrieves the scope for a function by its qualified name
 pub fn (e &Environment) get_fn_scope(module_name string, fn_name string) ?&Scope {
 	key := if module_name == '' { fn_name } else { '${module_name}__${fn_name}' }
-	mut scope := &Scope(unsafe { nil })
-	mut found_scope := false
-	lock e.fn_scopes {
-		if key in e.fn_scopes {
-			scope = unsafe { e.fn_scopes[key] }
-			found_scope = true
-		}
-	}
-	if !found_scope {
-		return none
-	}
-	return scope
+	return e.fn_scope_cache[key] or { return none }
 }
 
 // get_scope retrieves a module scope by exact module name.
 pub fn (e &Environment) get_scope(module_name string) ?&Scope {
-	mut scope := &Scope(unsafe { nil })
-	mut found_scope := false
-	lock e.scopes {
-		if module_name in e.scopes {
-			scope = unsafe { e.scopes[module_name] }
-			found_scope = true
-		}
-	}
-	if !found_scope {
-		return none
-	}
-	return scope
+	return e.scope_cache[module_name] or { return none }
 }
 
 // register_global adds or updates a module global in the type environment.
 pub fn (mut e Environment) register_global(module_name string, name string, typ Type) {
-	mut scope := &Scope(unsafe { nil })
-	mut found_scope := false
-	lock e.scopes {
-		if module_name in e.scopes {
-			scope = unsafe { e.scopes[module_name] }
-			found_scope = true
-		}
-	}
-	if !found_scope {
-		return
-	}
+	mut scope := e.scope_cache[module_name] or { return }
 	scope.insert_or_update(name, Global{
 		name: name
 		typ:  typ
@@ -264,31 +240,16 @@ pub fn (mut e Environment) register_global(module_name string, name string, typ 
 
 // get_fn_scope_by_key retrieves a function scope by its fully-qualified key.
 pub fn (e &Environment) get_fn_scope_by_key(key string) ?&Scope {
-	mut scope := &Scope(unsafe { nil })
-	mut found_scope := false
-	lock e.fn_scopes {
-		if key in e.fn_scopes {
-			scope = unsafe { e.fn_scopes[key] }
-			found_scope = true
-		}
-	}
-	if !found_scope {
-		return none
-	}
-	return scope
+	return e.fn_scope_cache[key] or { return none }
 }
 
 // snapshot_scopes returns a non-shared copy of the scopes map.
 pub fn (e &Environment) snapshot_scopes() map[string]&Scope {
 	mut result := map[string]&Scope{}
-	lock e.scopes {
-		// Use .keys() + index lookup instead of `for k, v in` to avoid
-		// ARM64 chained-access bug with shared map iteration.
-		scope_keys := e.scopes.keys()
-		for k in scope_keys {
-			v := e.scopes[k] or { continue }
-			result[k] = v
-		}
+	scope_keys := e.scope_cache.keys()
+	for k in scope_keys {
+		v := e.scope_cache[k] or { continue }
+		result[k] = v
 	}
 	return result
 }
@@ -296,12 +257,10 @@ pub fn (e &Environment) snapshot_scopes() map[string]&Scope {
 // snapshot_methods returns a non-shared copy of the methods map.
 pub fn (e &Environment) snapshot_methods() map[string][]&Fn {
 	mut result := map[string][]&Fn{}
-	lock e.methods {
-		method_keys := e.methods.keys()
-		for k in method_keys {
-			v := e.methods[k] or { continue }
-			result[k] = v
-		}
+	method_keys := e.method_cache.keys()
+	for k in method_keys {
+		v := e.method_cache[k] or { continue }
+		result[k] = v
 	}
 	return result
 }
@@ -309,12 +268,10 @@ pub fn (e &Environment) snapshot_methods() map[string][]&Fn {
 // snapshot_fn_scopes returns a non-shared copy of the fn_scopes map.
 pub fn (e &Environment) snapshot_fn_scopes() map[string]&Scope {
 	mut result := map[string]&Scope{}
-	lock e.fn_scopes {
-		fn_scope_keys := e.fn_scopes.keys()
-		for k in fn_scope_keys {
-			v := e.fn_scopes[k] or { continue }
-			result[k] = v
-		}
+	fn_scope_keys := e.fn_scope_cache.keys()
+	for k in fn_scope_keys {
+		v := e.fn_scope_cache[k] or { continue }
+		result[k] = v
 	}
 	return result
 }
@@ -540,14 +497,13 @@ fn fn_with_return_type(fn_type FnType, return_type Type) FnType {
 }
 
 pub fn (mut c Checker) get_module_scope(module_name string, parent &Scope) &Scope {
-	mut scope := &Scope(unsafe { nil })
+	if scope := c.env.scope_cache[module_name] {
+		return scope
+	}
+	scope := new_scope(parent)
+	c.env.scope_cache[module_name] = scope
 	lock c.env.scopes {
-		if module_name in c.env.scopes {
-			scope = unsafe { c.env.scopes[module_name] }
-		} else {
-			scope = new_scope(parent)
-			c.env.scopes[module_name] = scope
-		}
+		c.env.scopes[module_name] = scope
 	}
 	return scope
 }
@@ -614,14 +570,7 @@ pub fn (mut c Checker) check_file(file ast.File) {
 	// file_scope := new_scope(c.mod.scope)
 	// mut mod_scope := new_scope(c.mod.scope)
 	// c.env.scopes[file.mod] = mod_scope
-	mut mod_scope := &Scope(unsafe { nil })
-	lock c.env.scopes {
-		if file.mod in c.env.scopes {
-			mod_scope = unsafe { c.env.scopes[file.mod] }
-		} else {
-			panic('not found for mod: ${file.mod}')
-		}
-	}
+	mod_scope := c.env.get_scope(file.mod) or { panic('not found for mod: ${file.mod}') }
 	c.scope = mod_scope
 	// mut mod_scope := c.env.scopes[file.mod] or {
 	// 	panic('scope should exist')
@@ -691,14 +640,9 @@ fn (mut c Checker) preregister_all_scopes(files []ast.File) {
 
 pub fn (mut c Checker) preregister_types(file ast.File) {
 	c.cur_file_module = file.mod
-	mut mod_scope := &Scope(unsafe { nil })
-	lock c.env.scopes {
-		if file.mod in c.env.scopes {
-			mod_scope = unsafe { c.env.scopes[file.mod] }
-		} else {
-			eprintln('warning: scope not found for mod: ${file.mod}, skipping')
-			return
-		}
+	mod_scope := c.env.get_scope(file.mod) or {
+		eprintln('warning: scope not found for mod: ${file.mod}, skipping')
+		return
 	}
 	c.scope = mod_scope
 	for stmt in file.stmts {
@@ -727,14 +671,7 @@ fn (mut c Checker) preregister_all_fn_signatures(files []ast.File) {
 fn (mut c Checker) preregister_all_globals(files []ast.File) {
 	for file in files {
 		c.cur_file_module = file.mod
-		mut mod_scope := &Scope(unsafe { nil })
-		lock c.env.scopes {
-			if file.mod in c.env.scopes {
-				mod_scope = unsafe { c.env.scopes[file.mod] }
-			} else {
-				continue
-			}
-		}
+		mod_scope := c.env.get_scope(file.mod) or { continue }
 		c.scope = mod_scope
 		for stmt in file.stmts {
 			if stmt is ast.GlobalDecl {
@@ -746,14 +683,9 @@ fn (mut c Checker) preregister_all_globals(files []ast.File) {
 
 pub fn (mut c Checker) preregister_fn_signatures(file ast.File) {
 	c.cur_file_module = file.mod
-	mut mod_scope := &Scope(unsafe { nil })
-	lock c.env.scopes {
-		if file.mod in c.env.scopes {
-			mod_scope = unsafe { c.env.scopes[file.mod] }
-		} else {
-			eprintln('warning: scope not found for mod: ${file.mod}, skipping')
-			return
-		}
+	mod_scope := c.env.get_scope(file.mod) or {
+		eprintln('warning: scope not found for mod: ${file.mod}, skipping')
+		return
 	}
 	c.scope = mod_scope
 	prev_collect := c.collect_fn_signatures_only
@@ -1408,12 +1340,7 @@ fn (mut c Checker) infix_expr(expr ast.InfixExpr) Type {
 		resolved_lhs_st := resolved_lhs as Struct
 		op_name := expr.op.str()
 		tname := resolved_lhs_st.name
-		mut methods := []&Fn{}
-		rlock c.env.methods {
-			if tname in c.env.methods {
-				methods = unsafe { c.env.methods[tname] }
-			}
-		}
+		methods := c.env.methods_for_type(tname)
 		for method in methods {
 			if method.name == op_name {
 				if method.typ is FnType {
@@ -2902,16 +2829,14 @@ fn (mut c Checker) sync_imported_const_type(source Const) {
 	if source.mod == unsafe { nil } {
 		return
 	}
-	lock c.env.scopes {
-		for _, scope_ptr in c.env.scopes {
-			mut scope := unsafe { scope_ptr }
-			obj := scope.objects[source.name] or { continue }
-			if obj is Const {
-				if obj.mod == source.mod {
-					mut updated := obj
-					updated.typ = source.typ
-					scope.objects[source.name] = Object(updated)
-				}
+	for _, scope_ptr in c.env.scope_cache {
+		mut scope := unsafe { scope_ptr }
+		obj := scope.objects[source.name] or { continue }
+		if obj is Const {
+			if obj.mod == source.mod {
+				mut updated := obj
+				updated.typ = source.typ
+				scope.objects[source.name] = Object(updated)
 			}
 		}
 	}
@@ -3343,14 +3268,7 @@ fn collect_receiver_generic_params(mut params []string, expr ast.Expr) {
 // function signatures and bodies are registered, so function calls in defaults resolve.
 fn (mut c Checker) check_struct_field_defaults(files []ast.File) {
 	for file in files {
-		mut mod_scope := &Scope(unsafe { nil })
-		lock c.env.scopes {
-			if file.mod in c.env.scopes {
-				mod_scope = unsafe { c.env.scopes[file.mod] }
-			} else {
-				continue
-			}
-		}
+		mod_scope := c.env.get_scope(file.mod) or { continue }
 		c.scope = mod_scope
 		c.cur_file_module = file.mod
 		for stmt in file.stmts {
@@ -3375,14 +3293,7 @@ fn (mut c Checker) check_struct_field_defaults(files []ast.File) {
 // check_enum_field_values visits enum field value expressions.
 fn (mut c Checker) check_enum_field_values(files []ast.File) {
 	for file in files {
-		mut mod_scope := &Scope(unsafe { nil })
-		lock c.env.scopes {
-			if file.mod in c.env.scopes {
-				mod_scope = unsafe { c.env.scopes[file.mod] }
-			} else {
-				continue
-			}
-		}
+		mod_scope := c.env.get_scope(file.mod) or { continue }
 		c.scope = mod_scope
 		c.cur_file_module = file.mod
 		for stmt in file.stmts {
@@ -3798,15 +3709,7 @@ fn (mut c Checker) fn_decl(decl ast.FnDecl) {
 		}
 		// Register method in shared methods map (safe inside lock)
 		method_type_name := method_owner_type.name()
-		lock c.env.methods {
-			mut methods_for_type := []&Fn{}
-			found_in_map := method_type_name in c.env.methods
-			if found_in_map {
-				methods_for_type = unsafe { c.env.methods[method_type_name] }
-			}
-			methods_for_type << obj
-			c.env.methods[method_type_name] = methods_for_type
-		}
+		c.env.add_method_for_type(method_type_name, obj)
 		c.log('registering method: ${decl.name} for ${receiver_type.name()} - ${method_owner_type.name()} - ${receiver_base_type.name()}')
 		// Note: receiver was already inserted at line 1515 with correct type (including Pointer for mut)
 	} else {
@@ -4689,9 +4592,13 @@ fn (mut c Checker) infer_generic_type(param_type Type, arg_type Type, mut type_m
 			}
 		}
 		NamedType {
-			c.add_inferred_generic_type(mut type_map, param_type, arg_type)!
+			c.add_inferred_generic_type(mut type_map, string(param_type), arg_type)!
 		}
-		Struct {}
+		Struct {
+			if arg_type is Struct {
+				c.infer_generic_struct_fields(param_type, arg_type, mut type_map)!
+			}
+		}
 		OptionType {
 			if arg_type is OptionType {
 				c.infer_generic_type(param_type.base_type, arg_type.base_type, mut type_map)!
@@ -4739,6 +4646,207 @@ fn (mut c Checker) infer_generic_type(param_type Type, arg_type Type, mut type_m
 		// Other concrete types do not participate in generic inference.
 		Primitive, Char, Enum, ISize, Interface, Nil, None, Rune, String, SumType, USize, Void {}
 	}
+}
+
+fn type_contains_struct_name_for_generic_inference(typ Type, struct_name string, depth int) bool {
+	if struct_name == '' || depth > 24 {
+		return false
+	}
+	match typ {
+		Alias {
+			return typ.name == struct_name
+				|| type_contains_struct_name_for_generic_inference(typ.base_type, struct_name, depth + 1)
+		}
+		Array {
+			return type_contains_struct_name_for_generic_inference(typ.elem_type, struct_name,
+
+				depth + 1)
+		}
+		ArrayFixed {
+			return type_contains_struct_name_for_generic_inference(typ.elem_type, struct_name,
+
+				depth + 1)
+		}
+		Channel {
+			if elem_type := typ.elem_type {
+				return type_contains_struct_name_for_generic_inference(elem_type, struct_name,
+
+					depth + 1)
+			}
+		}
+		FnType {
+			for param in typ.params {
+				if type_contains_struct_name_for_generic_inference(param.typ, struct_name,
+					depth + 1)
+				{
+					return true
+				}
+			}
+			if return_type := typ.return_type {
+				return type_contains_struct_name_for_generic_inference(return_type, struct_name,
+
+					depth + 1)
+			}
+		}
+		Map {
+			return
+				type_contains_struct_name_for_generic_inference(typ.key_type, struct_name, depth + 1)
+				|| type_contains_struct_name_for_generic_inference(typ.value_type, struct_name, depth + 1)
+		}
+		OptionType {
+			return type_contains_struct_name_for_generic_inference(typ.base_type, struct_name,
+
+				depth + 1)
+		}
+		Pointer {
+			return type_contains_struct_name_for_generic_inference(typ.base_type, struct_name,
+
+				depth + 1)
+		}
+		ResultType {
+			return type_contains_struct_name_for_generic_inference(typ.base_type, struct_name,
+
+				depth + 1)
+		}
+		Struct {
+			return typ.name == struct_name
+		}
+		Thread {
+			if elem_type := typ.elem_type {
+				return type_contains_struct_name_for_generic_inference(elem_type, struct_name,
+
+					depth + 1)
+			}
+		}
+		Tuple {
+			for tuple_type in typ.types {
+				if type_contains_struct_name_for_generic_inference(tuple_type, struct_name, depth +
+					1)
+				{
+					return true
+				}
+			}
+		}
+		else {}
+	}
+
+	return false
+}
+
+fn type_contains_named_type_for_generic_inference(typ Type, depth int) bool {
+	if depth > 24 {
+		return false
+	}
+	match typ {
+		Alias {
+			return type_contains_named_type_for_generic_inference(typ.base_type, depth + 1)
+		}
+		Array {
+			return type_contains_named_type_for_generic_inference(typ.elem_type, depth + 1)
+		}
+		ArrayFixed {
+			return type_contains_named_type_for_generic_inference(typ.elem_type, depth + 1)
+		}
+		Channel {
+			if elem_type := typ.elem_type {
+				return type_contains_named_type_for_generic_inference(elem_type, depth + 1)
+			}
+		}
+		FnType {
+			for param in typ.params {
+				if type_contains_named_type_for_generic_inference(param.typ, depth + 1) {
+					return true
+				}
+			}
+			if return_type := typ.return_type {
+				return type_contains_named_type_for_generic_inference(return_type, depth + 1)
+			}
+		}
+		Map {
+			return type_contains_named_type_for_generic_inference(typ.key_type, depth + 1)
+				|| type_contains_named_type_for_generic_inference(typ.value_type, depth + 1)
+		}
+		NamedType {
+			return true
+		}
+		OptionType {
+			return type_contains_named_type_for_generic_inference(typ.base_type, depth + 1)
+		}
+		Pointer {
+			return type_contains_named_type_for_generic_inference(typ.base_type, depth + 1)
+		}
+		ResultType {
+			return type_contains_named_type_for_generic_inference(typ.base_type, depth + 1)
+		}
+		Thread {
+			if elem_type := typ.elem_type {
+				return type_contains_named_type_for_generic_inference(elem_type, depth + 1)
+			}
+		}
+		Tuple {
+			for tuple_type in typ.types {
+				if type_contains_named_type_for_generic_inference(tuple_type, depth + 1) {
+					return true
+				}
+			}
+		}
+		else {}
+	}
+
+	return false
+}
+
+fn (mut c Checker) infer_generic_struct_fields(param_type Struct, arg_type Struct, mut type_map map[string]Type) ! {
+	mut param_struct := param_type
+	if param_struct.fields.len == 0 && param_struct.name != '' {
+		if live_type := c.lookup_type_by_name(param_struct.name) {
+			if live_type is Struct {
+				param_struct = live_type
+			}
+		}
+	}
+	if param_struct.fields.len == 0 || arg_type.fields.len == 0 {
+		return
+	}
+	for param_field in param_struct.fields {
+		for arg_field in arg_type.fields {
+			if param_field.name == arg_field.name {
+				if type_contains_struct_name_for_generic_inference(param_field.typ,
+					param_struct.name, 0)
+				{
+					break
+				}
+				c.infer_generic_type(param_field.typ, arg_field.typ, mut type_map)!
+				break
+			}
+		}
+	}
+}
+
+fn (mut c Checker) infer_receiver_generic_type(receiver_type Type, mut type_map map[string]Type) ! {
+	mut actual_type := receiver_type.typed_default()
+	if actual_type is Pointer {
+		actual_type = actual_type.base_type
+	}
+	if actual_type is Alias {
+		actual_type = resolve_alias(actual_type)
+	}
+	if actual_type !is Struct {
+		return
+	}
+	actual_struct := actual_type as Struct
+	if actual_struct.name == '' {
+		return
+	}
+	template_type := c.lookup_type_by_name(actual_struct.name) or { return }
+	if template_type !is Struct {
+		return
+	}
+	template_struct := template_type as Struct
+	if template_struct.generic_params.len == 0 {
+		return
+	}
+	c.infer_generic_struct_fields(template_struct, actual_struct, mut type_map)!
 }
 
 fn (mut c Checker) call_expr(expr ast.CallExpr) Type {
@@ -4841,9 +4949,22 @@ fn (mut c Checker) call_expr(expr ast.CallExpr) Type {
 	}
 	if mut fn_ is FnType {
 		mut generic_type_map := map[string]Type{}
-		if fn_.generic_params.len > 0 {
+		return_type_has_named_generic := if return_type := fn_.return_type {
+			type_contains_named_type_for_generic_inference(return_type, 0)
+		} else {
+			false
+		}
+		should_infer_generics := fn_.generic_params.len > 0
+			|| (lhs_expr is ast.SelectorExpr && return_type_has_named_generic)
+		if should_infer_generics {
+			if lhs_expr is ast.SelectorExpr {
+				receiver_type := c.expr(lhs_expr.lhs).typed_default()
+				c.infer_receiver_generic_type(receiver_type, mut generic_type_map) or {
+					c.error_with_pos(err.msg(), expr.pos)
+				}
+			}
 			// generic types provided `[int, string]`
-			if lhs_expr is ast.GenericArgs {
+			if fn_.generic_params.len > 0 && lhs_expr is ast.GenericArgs {
 				// panic('GOT GENERIC CALL')
 				mut generic_types := []Type{}
 				for i, ga in lhs_expr.args {
@@ -4859,7 +4980,7 @@ fn (mut c Checker) call_expr(expr ast.CallExpr) Type {
 				// dump(generic_types)
 			}
 			// infer generic types from args
-			else {
+			else if fn_.generic_params.len > 0 {
 				// TODO: move above (to be done globally)
 				// once error is fixed
 				mut arg_types := []Type{}
@@ -6067,12 +6188,7 @@ fn (mut c Checker) find_field_or_method(t Type, raw_name string) !Type {
 	// Char and Rune share methods: look up 'rune' methods, then 'u8' methods
 	if t is Char || t is Rune {
 		for alias_name in ['rune', 'char', 'u8'] {
-			mut alias_methods := []&Fn{}
-			rlock c.env.methods {
-				if alias_name in c.env.methods {
-					alias_methods = unsafe { c.env.methods[alias_name] }
-				}
-			}
+			alias_methods := c.env.methods_for_type(alias_name)
 			for method in alias_methods {
 				if method.name == name {
 					return method.typ
@@ -6203,12 +6319,7 @@ fn (c &Checker) lookup_method_direct(t Type, name string) ?Type {
 		return fn_with_return_type(empty_fn_type(), Type(string_))
 	}
 	base_type_name := if t is Pointer { base_type.name() } else { t.name() }
-	mut methods := []&Fn{}
-	rlock c.env.methods {
-		if base_type_name in c.env.methods {
-			methods = unsafe { c.env.methods[base_type_name] }
-		}
-	}
+	methods := c.env.methods_for_type(base_type_name)
 	for method in methods {
 		if method_name_matches(method.name, name) {
 			return method.typ
@@ -6245,12 +6356,7 @@ fn (mut c Checker) find_method(t Type, name string) !Type {
 	base_type_name := if t is Pointer { base_type.name() } else { t.name() }
 	// c.log('base_type_name: ${base_type_name} - ${t.type_name()} - ${base_type.type_name()}')
 	// Lookup method in shared methods map
-	mut methods := []&Fn{}
-	rlock c.env.methods {
-		if base_type_name in c.env.methods {
-			methods = unsafe { c.env.methods[base_type_name] }
-		}
-	}
+	methods := c.env.methods_for_type(base_type_name)
 	for method in methods {
 		// c.log('# ${method.name} - ${name}')
 		if method_name_matches(method.name, name) {

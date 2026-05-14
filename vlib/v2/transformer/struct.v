@@ -1828,16 +1828,92 @@ fn (t &Transformer) get_init_expr_field_type_name(init_typ_expr ast.Expr, field_
 	return ''
 }
 
+struct TypeLookupWithModule {
+	typ         types.Type
+	module_name string
+}
+
+fn transformer_module_short_name(module_name string) string {
+	if module_name.contains('.') {
+		return module_name.all_after_last('.')
+	}
+	if module_name.contains('__') {
+		return module_name.all_after_last('__')
+	}
+	return module_name
+}
+
+fn (t &Transformer) lookup_type_with_module_name(name string) ?TypeLookupWithModule {
+	normalized_name := name.replace('.', '__')
+	mut lookup_name := normalized_name
+	mut lookup_module := t.cur_module
+	dunder := normalized_name.index('__') or { -1 }
+	if dunder >= 0 {
+		lookup_module = normalized_name[..dunder]
+		last_dunder := normalized_name.last_index('__') or { dunder }
+		lookup_name = normalized_name[last_dunder + 2..]
+	}
+	if scope := t.get_module_scope(lookup_module) {
+		if obj := scope.objects[lookup_name] {
+			if obj is types.Type {
+				if !is_type_valid(obj) {
+					return none
+				}
+				return TypeLookupWithModule{
+					typ:         types.Type(obj)
+					module_name: lookup_module
+				}
+			}
+		}
+	}
+	if lookup_module != '' {
+		for mod_name, scope in t.cached_scopes {
+			mod_short := transformer_module_short_name(mod_name)
+			if mod_short != lookup_module {
+				continue
+			}
+			if obj := scope.objects[lookup_name] {
+				if obj is types.Type {
+					if !is_type_valid(obj) {
+						continue
+					}
+					return TypeLookupWithModule{
+						typ:         types.Type(obj)
+						module_name: mod_short
+					}
+				}
+			}
+		}
+	}
+	if dunder < 0 {
+		for mod_name, fallback_scope in t.cached_scopes {
+			if fallback_obj := fallback_scope.objects[lookup_name] {
+				if fallback_obj is types.Type {
+					if !is_type_valid(fallback_obj) {
+						continue
+					}
+					return TypeLookupWithModule{
+						typ:         types.Type(fallback_obj)
+						module_name: transformer_module_short_name(mod_name)
+					}
+				}
+			}
+		}
+	}
+	return none
+}
+
 fn (mut t Transformer) add_missing_struct_field_defaults(struct_name string, fields []ast.FieldInit) []ast.FieldInit {
 	if struct_name == '' {
 		return fields
 	}
-	struct_type := t.lookup_type(struct_name) or {
+	type_lookup := t.lookup_type_with_module_name(struct_name) or {
 		if struct_name.contains('Scope') || struct_name.contains('DenseArray')
 			|| struct_name.contains('Env') {
 		}
 		return fields
 	}
+	struct_type := type_lookup.typ
 	base_type := t.unwrap_alias_and_pointer_type(struct_type)
 	if base_type !is types.Struct {
 		if struct_name.contains('Scope') || struct_name.contains('DenseArray')
@@ -1846,6 +1922,13 @@ fn (mut t Transformer) add_missing_struct_field_defaults(struct_name string, fie
 		return fields
 	}
 	struct_info := base_type as types.Struct
+	default_struct_short_name := if struct_info.name != '' { struct_info.name } else { struct_name }
+	default_struct_name := if default_struct_short_name.contains('__') || type_lookup.module_name == ''
+		|| type_lookup.module_name == 'main' || type_lookup.module_name == 'builtin' {
+		default_struct_short_name
+	} else {
+		'${type_lookup.module_name}__${default_struct_short_name}'
+	}
 	mut existing := map[string]bool{}
 	mut positional_idx := 0
 	for field in fields {
@@ -1873,7 +1956,7 @@ fn (mut t Transformer) add_missing_struct_field_defaults(struct_name string, fie
 				struct_field.typ)
 			out << ast.FieldInit{
 				name:  struct_field.name
-				value: t.transform_struct_field_default_expr(struct_name, resolved_default)
+				value: t.transform_struct_field_default_expr(default_struct_name, resolved_default)
 			}
 			continue
 		}
@@ -1950,7 +2033,7 @@ fn (mut t Transformer) add_missing_struct_field_defaults(struct_name string, fie
 			}
 			if struct_field.default_expr !is ast.EmptyExpr
 				&& t.is_supported_struct_default_expr(struct_field.default_expr) {
-				mut emb_struct_name := struct_name
+				mut emb_struct_name := default_struct_name
 				if emb.name.contains('__') {
 					emb_struct_name = emb.name
 				}
@@ -2076,6 +2159,23 @@ fn (mut t Transformer) transform_struct_field_default_expr(struct_name string, e
 						name: module_name
 					}
 					rhs: expr
+				}
+			}
+			if expr is ast.CallExpr && expr.lhs is ast.Ident {
+				fn_name := expr.lhs.name
+				if _ := t.lookup_fn_cached(module_name, fn_name) {
+					old_module := t.cur_module
+					t.cur_module = module_name
+					transformed := t.transform_call_expr(ast.CallExpr{
+						lhs: ast.Ident{
+							name: '${module_name}__${fn_name}'
+							pos:  expr.pos
+						}
+						args: expr.args
+						pos:  expr.pos
+					})
+					t.cur_module = old_module
+					return transformed
 				}
 			}
 			old_module := t.cur_module

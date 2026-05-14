@@ -1994,6 +1994,15 @@ fn (mut b Builder) ast_type_to_ssa(typ ast.Expr) TypeID {
 		base := b.ast_type_to_ssa(inner)
 		return b.mod.type_store.get_ptr(base)
 	}
+	raw_fixed_len, raw_fixed_elem, has_raw_fixed := ast_expr_raw_array_fixed_type_parts(typ)
+	if has_raw_fixed {
+		elem_type := b.ast_type_to_ssa(raw_fixed_elem)
+		arr_len := b.array_fixed_len_from_expr(raw_fixed_len)
+		if arr_len > 0 && elem_type != 0 {
+			return b.mod.type_store.get_array(elem_type, arr_len)
+		}
+		return b.mod.type_store.get_int(64)
+	}
 	if ast_expr_is_raw_array_type(typ) {
 		return b.get_array_type()
 	}
@@ -2110,13 +2119,7 @@ fn (mut b Builder) ast_type_node_to_ssa(typ ast.Type) TypeID {
 		ast.ArrayFixedType {
 			// [N]T → SSA array type with N elements of T
 			elem_type := b.ast_type_to_ssa(typ.elem_type)
-			arr_len := if typ.len is ast.BasicLiteral {
-				int(parse_const_int_literal(typ.len.value))
-			} else if typ.len is ast.Ident {
-				b.resolve_const_int(typ.len.name)
-			} else {
-				0
-			}
+			arr_len := b.array_fixed_len_from_expr(typ.len)
 			if arr_len > 0 {
 				return b.mod.type_store.get_array(elem_type, arr_len)
 			}
@@ -2150,6 +2153,16 @@ fn (mut b Builder) ast_type_node_to_ssa(typ ast.Type) TypeID {
 			return b.mod.type_store.get_int(64)
 		}
 	}
+}
+
+fn (mut b Builder) array_fixed_len_from_expr(expr ast.Expr) int {
+	if expr is ast.BasicLiteral {
+		return int(parse_const_int_literal(expr.value))
+	}
+	if expr is ast.Ident {
+		return b.resolve_const_int(expr.name)
+	}
+	return 0
 }
 
 fn (mut b Builder) ident_type_to_ssa(name string) TypeID {
@@ -6638,6 +6651,45 @@ fn ast_expr_raw_pointer_type_inner(expr ast.Expr) (ast.Expr, bool) {
 		(&u64(&inner))[1] = pointer_words[1]
 	}
 	return inner, true
+}
+
+fn ast_expr_raw_array_fixed_type_parts(expr ast.Expr) (ast.Expr, ast.Expr, bool) {
+	if expr is ast.Type {
+		typ := expr as ast.Type
+		if typ is ast.ArrayFixedType {
+			aft := typ as ast.ArrayFixedType
+			return aft.len, aft.elem_type, true
+		}
+	}
+	expr_tag := unsafe { (&u64(&expr))[0] }
+	// ast.Expr Type variant in the native sumtype layout.
+	if expr_tag != 38 {
+		return ast.empty_expr, ast.empty_expr, false
+	}
+	type_data := unsafe { (&u64(&expr))[1] }
+	if type_data == 0 {
+		return ast.empty_expr, ast.empty_expr, false
+	}
+	type_words := unsafe { &u64(voidptr(type_data)) }
+	type_tag := unsafe { type_words[0] }
+	// ast.Type ArrayFixedType variant in the native sumtype layout.
+	if type_tag != 1 {
+		return ast.empty_expr, ast.empty_expr, false
+	}
+	fixed_data := unsafe { type_words[1] }
+	if fixed_data == 0 {
+		return ast.empty_expr, ast.empty_expr, false
+	}
+	fixed_words := unsafe { &u64(voidptr(fixed_data)) }
+	mut len_expr := ast.empty_expr
+	mut elem_expr := ast.empty_expr
+	unsafe {
+		(&u64(&len_expr))[0] = fixed_words[0]
+		(&u64(&len_expr))[1] = fixed_words[1]
+		(&u64(&elem_expr))[0] = fixed_words[2]
+		(&u64(&elem_expr))[1] = fixed_words[3]
+	}
+	return len_expr, elem_expr, true
 }
 
 fn ast_expr_raw_option_type_inner(expr ast.Expr) (ast.Expr, bool) {

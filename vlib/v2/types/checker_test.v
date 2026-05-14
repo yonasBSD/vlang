@@ -499,6 +499,38 @@ fn main() {
 	}), 'generic []&T return should substitute T inside pointer and array wrappers'
 }
 
+fn test_generic_method_receiver_option_return_uses_concrete_receiver_type() {
+	code := '
+struct Item {}
+
+struct Match[T] {
+	value T
+	has_value bool
+}
+
+fn (m Match[T]) inner() ?T {
+	if !m.has_value {
+		return none
+	}
+	return m.value
+}
+
+fn use(m Match[Item]) {
+	value := m.inner()
+	_ = value
+}
+'
+	env := check_code(code)
+	assert has_type_matching(env, fn (t Type) bool {
+		if t is OptionType {
+			if t.base_type is Struct {
+				return t.base_type.name == 'Item'
+			}
+		}
+		return false
+	}), 'generic method option return should substitute T from the concrete receiver type'
+}
+
 fn test_nested_sumtype_variants_in_in_array_literal() {
 	code := '
 struct InfixExpr {}

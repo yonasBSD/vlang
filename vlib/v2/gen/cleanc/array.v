@@ -707,6 +707,8 @@ fn (mut g Gen) gen_array_init_expr(node ast.ArrayInitExpr) {
 		should_use_inferred := final_elem == '' || final_elem == 'int'
 			|| final_elem == 'int_literal'
 			|| (inferred != '' && final_elem != '' && inferred.starts_with('${final_elem}_T_'))
+			|| (final_elem.starts_with('Array_') && final_elem.ends_with('ptr')
+			&& inferred != '' && !inferred.starts_with('Array_') && !inferred.ends_with('*'))
 		if should_use_inferred && inferred != '' && inferred != 'array' && inferred != 'int' {
 			final_elem = inferred
 		}
