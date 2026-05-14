@@ -2,6 +2,6 @@ vlib/v/checker/tests/pool_processor_callback_array_return_err.vv:9:3: error: can
     7 | fn main() {
     8 |     _ := pool.new_pool_processor(
     9 |         callback: fn (mut pp pool.PoolProcessor, idx int, wid int) []Foo {
-      |         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+      |         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
    10 |             _ = wid
    11 |             return [Foo{

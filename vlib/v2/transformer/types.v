@@ -3868,12 +3868,21 @@ fn (t &Transformer) type_to_c_name_resolve_alias(typ types.Type) string {
 			'f64', 'rune']
 		// First check if the alias name itself is already a primitive
 		// (in self-host mode, 'int' is stored as Alias with malformed .base_type)
-		alias_name := t.type_to_c_name(typ)
+		alias_typ := types.Type(typ)
+		raw_alias_name := types.type_name(alias_typ)
+		if raw_alias_name == '' {
+			return 'int'
+		}
+		alias_name := t.qualify_type_name(raw_alias_name)
 		if alias_name in primitives {
 			return alias_name
 		}
-		// Resolve to the underlying type
-		base := typ.base_type
+		// Resolve to the underlying type. Use the helper instead of direct field
+		// access because self-hosted ARM64 aliases can carry a null data pointer.
+		base := types.resolve_alias(alias_typ)
+		if types.type_name(base) == '' {
+			return alias_name
+		}
 		// If base is a primitive int type, use that
 		base_name := t.type_to_c_name(base)
 		if base_name in primitives {

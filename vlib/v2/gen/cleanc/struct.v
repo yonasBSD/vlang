@@ -1623,8 +1623,7 @@ fn (mut g Gen) gen_init_expr(node ast.InitExpr) {
 			mut wrote_defaults := 0
 			g.sb.write_string('((${type_name}){')
 			for field in env_struct.fields {
-				expected_field_type := g.init_field_expected_type(type_name, env_struct,
-					field.name)
+				expected_field_type := g.init_field_expected_type(type_name, env_struct, field.name)
 				if !g.struct_field_needs_explicit_default_for(type_name, env_struct, field) {
 					continue
 				}
@@ -1848,8 +1847,7 @@ fn (mut g Gen) gen_init_expr(node ast.InitExpr) {
 				if initialized_fields[field.name] {
 					continue
 				}
-				expected_field_type := g.init_field_expected_type(type_name, env_struct,
-					field.name)
+				expected_field_type := g.init_field_expected_type(type_name, env_struct, field.name)
 				if !g.struct_field_needs_explicit_default_for(type_name, env_struct, field) {
 					continue
 				}

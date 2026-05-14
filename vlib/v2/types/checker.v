@@ -14,6 +14,9 @@ const embed_file_helper_type_name = '__V2EmbedFileData'
 
 pub struct Environment {
 pub mut:
+	scope_cache    map[string]&Scope
+	fn_scope_cache map[string]&Scope
+	method_cache   map[string][]&Fn
 	// errors with no default value
 	scopes shared map[string]&Scope = map[string]&Scope{}
 	// Function scopes - stores the scope for each function by qualified name (module__fn_name)
@@ -22,9 +25,6 @@ pub mut:
 	// types map[int]Type
 	// methods - shared for parallel type checking
 	methods           shared map[string][]&Fn = map[string][]&Fn{}
-	scope_cache       map[string]&Scope
-	fn_scope_cache    map[string]&Scope
-	method_cache      map[string][]&Fn
 	generic_types     map[string][]map[string]Type
 	cur_generic_types []map[string]Type
 	// Expression types - indexed directly by pos.id.
@@ -184,10 +184,17 @@ pub fn (mut e Environment) add_method_for_type(type_name string, method &Fn) {
 	}
 }
 
+fn (mut e Environment) set_scope(module_name string, scope &Scope) {
+	e.scope_cache[module_name] = scope
+	lock e.scopes {
+		e.scopes[module_name] = scope
+	}
+}
+
 // lookup_fn looks up a function by module and name in the environment's scopes
 // Returns the function's FnType if found
 pub fn (e &Environment) lookup_fn(module_name string, fn_name string) ?FnType {
-	scope := e.scope_cache[module_name] or { return none }
+	scope := e.get_scope(module_name) or { return none }
 	if obj := scope.lookup_parent(fn_name, 0) {
 		if obj is Fn {
 			typ := obj.get_typ()
@@ -212,6 +219,11 @@ pub fn (e &Environment) lookup_local_var(scope &Scope, name string) ?Type {
 // set_fn_scope stores the scope for a function by its qualified name
 pub fn (mut e Environment) set_fn_scope(module_name string, fn_name string, scope &Scope) {
 	key := if module_name == '' { fn_name } else { '${module_name}__${fn_name}' }
+	e.set_fn_scope_by_key(key, scope)
+}
+
+// set_fn_scope_by_key stores the scope for a function by its fully-qualified key.
+pub fn (mut e Environment) set_fn_scope_by_key(key string, scope &Scope) {
 	e.fn_scope_cache[key] = scope
 	lock e.fn_scopes {
 		e.fn_scopes[key] = scope
@@ -231,7 +243,7 @@ pub fn (e &Environment) get_scope(module_name string) ?&Scope {
 
 // register_global adds or updates a module global in the type environment.
 pub fn (mut e Environment) register_global(module_name string, name string, typ Type) {
-	mut scope := e.scope_cache[module_name] or { return }
+	mut scope := e.get_scope(module_name) or { return }
 	scope.insert_or_update(name, Global{
 		name: name
 		typ:  typ
@@ -497,14 +509,11 @@ fn fn_with_return_type(fn_type FnType, return_type Type) FnType {
 }
 
 pub fn (mut c Checker) get_module_scope(module_name string, parent &Scope) &Scope {
-	if scope := c.env.scope_cache[module_name] {
+	if scope := c.env.get_scope(module_name) {
 		return scope
 	}
 	scope := new_scope(parent)
-	c.env.scope_cache[module_name] = scope
-	lock c.env.scopes {
-		c.env.scopes[module_name] = scope
-	}
+	c.env.set_scope(module_name, scope)
 	return scope
 }
 
@@ -2829,7 +2838,8 @@ fn (mut c Checker) sync_imported_const_type(source Const) {
 	if source.mod == unsafe { nil } {
 		return
 	}
-	for _, scope_ptr in c.env.scope_cache {
+	scopes := c.env.snapshot_scopes()
+	for _, scope_ptr in scopes {
 		mut scope := unsafe { scope_ptr }
 		obj := scope.objects[source.name] or { continue }
 		if obj is Const {

@@ -290,8 +290,8 @@ fn (t &Transformer) infer_receiver_generic_bindings(receiver ast.Expr) map[strin
 	for template_field in template_struct.fields {
 		for actual_field in actual_struct.fields {
 			if template_field.name == actual_field.name {
-				infer_transformer_generic_bindings(template_field.typ, actual_field.typ,
-					mut bindings, 0)
+				infer_transformer_generic_bindings(template_field.typ, actual_field.typ, mut
+					bindings, 0)
 				break
 			}
 		}
@@ -306,26 +306,27 @@ fn infer_transformer_generic_bindings(param_type types.Type, arg_type types.Type
 	match param_type {
 		types.Alias {
 			infer_transformer_generic_bindings(param_type.base_type, arg_type, mut bindings,
+
 				depth + 1)
 		}
 		types.Array {
 			if arg_type is types.Array {
-				infer_transformer_generic_bindings(param_type.elem_type, arg_type.elem_type,
-					mut bindings, depth + 1)
+				infer_transformer_generic_bindings(param_type.elem_type, arg_type.elem_type, mut
+					bindings, depth + 1)
 			}
 		}
 		types.ArrayFixed {
 			if arg_type is types.ArrayFixed {
-				infer_transformer_generic_bindings(param_type.elem_type, arg_type.elem_type,
-					mut bindings, depth + 1)
+				infer_transformer_generic_bindings(param_type.elem_type, arg_type.elem_type, mut
+					bindings, depth + 1)
 			}
 		}
 		types.Map {
 			if arg_type is types.Map {
-				infer_transformer_generic_bindings(param_type.key_type, arg_type.key_type,
-					mut bindings, depth + 1)
-				infer_transformer_generic_bindings(param_type.value_type, arg_type.value_type,
-					mut bindings, depth + 1)
+				infer_transformer_generic_bindings(param_type.key_type, arg_type.key_type, mut
+					bindings, depth + 1)
+				infer_transformer_generic_bindings(param_type.value_type, arg_type.value_type, mut
+					bindings, depth + 1)
 			}
 		}
 		types.NamedType {
@@ -333,23 +334,24 @@ fn infer_transformer_generic_bindings(param_type types.Type, arg_type types.Type
 		}
 		types.OptionType {
 			if arg_type is types.OptionType {
-				infer_transformer_generic_bindings(param_type.base_type, arg_type.base_type,
-					mut bindings, depth + 1)
+				infer_transformer_generic_bindings(param_type.base_type, arg_type.base_type, mut
+					bindings, depth + 1)
 			}
 		}
 		types.Pointer {
 			if arg_type is types.Pointer {
-				infer_transformer_generic_bindings(param_type.base_type, arg_type.base_type,
-					mut bindings, depth + 1)
+				infer_transformer_generic_bindings(param_type.base_type, arg_type.base_type, mut
+					bindings, depth + 1)
 			} else {
 				infer_transformer_generic_bindings(param_type.base_type, arg_type, mut bindings,
+
 					depth + 1)
 			}
 		}
 		types.ResultType {
 			if arg_type is types.ResultType {
-				infer_transformer_generic_bindings(param_type.base_type, arg_type.base_type,
-					mut bindings, depth + 1)
+				infer_transformer_generic_bindings(param_type.base_type, arg_type.base_type, mut
+					bindings, depth + 1)
 			}
 		}
 		else {}
@@ -364,21 +366,18 @@ fn substitute_transformer_generic_type(typ types.Type, bindings map[string]types
 		types.Alias {
 			return types.Type(types.Alias{
 				name:      typ.name
-				base_type: substitute_transformer_generic_type(typ.base_type, bindings,
-					depth + 1)
+				base_type: substitute_transformer_generic_type(typ.base_type, bindings, depth + 1)
 			})
 		}
 		types.Array {
 			return types.Type(types.Array{
-				elem_type: substitute_transformer_generic_type(typ.elem_type, bindings,
-					depth + 1)
+				elem_type: substitute_transformer_generic_type(typ.elem_type, bindings, depth + 1)
 			})
 		}
 		types.ArrayFixed {
 			return types.Type(types.ArrayFixed{
 				len:       typ.len
-				elem_type: substitute_transformer_generic_type(typ.elem_type, bindings,
-					depth + 1)
+				elem_type: substitute_transformer_generic_type(typ.elem_type, bindings, depth + 1)
 			})
 		}
 		types.Channel {
@@ -392,8 +391,7 @@ fn substitute_transformer_generic_type(typ types.Type, bindings map[string]types
 		types.Map {
 			return types.Type(types.Map{
 				key_type:   substitute_transformer_generic_type(typ.key_type, bindings, depth + 1)
-				value_type: substitute_transformer_generic_type(typ.value_type, bindings,
-					depth + 1)
+				value_type: substitute_transformer_generic_type(typ.value_type, bindings, depth + 1)
 			})
 		}
 		types.NamedType {

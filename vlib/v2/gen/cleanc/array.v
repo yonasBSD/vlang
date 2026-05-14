@@ -503,6 +503,11 @@ fn (mut g Gen) infer_array_elem_type_from_expr(arr_expr ast.Expr) string {
 		mut elem_type := g.extract_array_elem_type(arr_expr.typ)
 		if arr_expr.exprs.len > 0 {
 			first_expr_type := g.array_init_elem_type_from_expr(arr_expr.exprs[0])
+			if elem_type.starts_with('Array_')
+				&& (elem_type.ends_with('*') || elem_type.ends_with('ptr')) && first_expr_type != ''
+				&& !first_expr_type.starts_with('Array_') && !first_expr_type.ends_with('*') {
+				return first_expr_type
+			}
 			if elem_type != '' && first_expr_type != ''
 				&& first_expr_type.starts_with('${elem_type}_T_') {
 				return first_expr_type
@@ -707,8 +712,8 @@ fn (mut g Gen) gen_array_init_expr(node ast.ArrayInitExpr) {
 		should_use_inferred := final_elem == '' || final_elem == 'int'
 			|| final_elem == 'int_literal'
 			|| (inferred != '' && final_elem != '' && inferred.starts_with('${final_elem}_T_'))
-			|| (final_elem.starts_with('Array_') && final_elem.ends_with('ptr')
-			&& inferred != '' && !inferred.starts_with('Array_') && !inferred.ends_with('*'))
+			|| (final_elem.starts_with('Array_') && final_elem.ends_with('ptr') && inferred != ''
+			&& !inferred.starts_with('Array_') && !inferred.ends_with('*'))
 		if should_use_inferred && inferred != '' && inferred != 'array' && inferred != 'int' {
 			final_elem = inferred
 		}

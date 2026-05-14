@@ -1289,13 +1289,10 @@ pub fn (mut t Transformer) post_pass(mut result []ast.File) {
 		t.env.set_expr_type(id, typ)
 	}
 	// Push cached_fn_scopes back to the environment for prop_types.
-	lock t.env.fn_scopes {
-		fn_scope_keys := t.cached_fn_scopes.keys()
-		for k in fn_scope_keys {
-			v := t.cached_fn_scopes[k] or { continue }
-			t.env.fn_scope_cache[k] = v
-			t.env.fn_scopes[k] = v
-		}
+	fn_scope_keys := t.cached_fn_scopes.keys()
+	for k in fn_scope_keys {
+		v := t.cached_fn_scopes[k] or { continue }
+		t.env.set_fn_scope_by_key(k, v)
 	}
 	t.propagate_types(result)
 }
@@ -11452,6 +11449,25 @@ fn (mut t Transformer) resolve_enum_shorthand(expr ast.Expr, enum_type string) a
 	return expr
 }
 
+fn (t &Transformer) concrete_array_literal_elem_name(expr ast.Expr) string {
+	if expr is ast.ModifierExpr {
+		return t.concrete_array_literal_elem_name(expr.expr)
+	}
+	if expr is ast.ParenExpr {
+		return t.concrete_array_literal_elem_name(expr.expr)
+	}
+	if expr is ast.InitExpr {
+		return t.expr_to_type_name(expr.typ)
+	}
+	if expr is ast.CastExpr {
+		return t.expr_to_type_name(expr.typ)
+	}
+	if typ := t.get_expr_type(expr) {
+		return t.type_to_c_name(typ)
+	}
+	return ''
+}
+
 // transform_array_with_enum_context transforms an array init, resolving enum shorthand using the given enum type
 fn (mut t Transformer) transform_array_with_enum_context(arr ast.ArrayInitExpr, enum_type string) ast.Expr {
 	mut exprs := []ast.Expr{cap: arr.exprs.len}
@@ -11513,21 +11529,16 @@ fn (mut t Transformer) transform_array_init_with_exprs(arr ast.ArrayInitExpr, ex
 						name: tn
 					})
 					if arr.exprs.len > 0 {
-						mut first_name := ''
-						if arr.exprs[0] is ast.InitExpr {
-							first_name = t.expr_to_type_name((arr.exprs[0] as ast.InitExpr).typ)
-						}
-						if first_name == '' {
-							if first_type := t.get_expr_type(arr.exprs[0]) {
-								first_name = t.type_to_c_name(first_type)
-							}
+						mut first_name := t.concrete_array_literal_elem_name(arr.exprs[0])
+						if first_name == '' && exprs.len > 0 {
+							first_name = t.concrete_array_literal_elem_name(exprs[0])
 						}
 						if tn.starts_with('Array_') && tn.ends_with('ptr') && first_name != ''
 							&& !first_name.starts_with('Array_') && !first_name.ends_with('*') {
-								elem_type_name = first_name
-								elem_type_expr2 = ast.Expr(ast.Ident{
-									name: first_name
-								})
+							elem_type_name = first_name
+							elem_type_expr2 = ast.Expr(ast.Ident{
+								name: first_name
+							})
 						}
 					}
 				}

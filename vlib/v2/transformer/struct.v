@@ -879,6 +879,28 @@ fn (mut t Transformer) transform_array_init_expr(expr ast.ArrayInitExpr) ast.Exp
 	// First, try to get the array type from the type checker's annotations
 	mut elem_type_name := 'int'
 	mut elem_type_expr_resolved := elem_type_expr
+	if elem_type_expr_resolved !is ast.EmptyExpr && exprs.len > 0 {
+		mut inferred_elem_name := t.expr_to_type_name(elem_type_expr_resolved)
+		if inferred_elem_name == '' {
+			inferred_elem_name = t.type_expr_to_c_name(elem_type_expr_resolved)
+		}
+		if inferred_elem_name.starts_with('Array_') && inferred_elem_name.ends_with('ptr') {
+			mut first_name := if expr.exprs.len > 0 {
+				t.concrete_array_literal_elem_name(expr.exprs[0])
+			} else {
+				''
+			}
+			if first_name == '' {
+				first_name = t.concrete_array_literal_elem_name(exprs[0])
+			}
+			if first_name != '' && !first_name.starts_with('Array_') && !first_name.ends_with('*') {
+				elem_type_name = first_name
+				elem_type_expr_resolved = ast.Expr(ast.Ident{
+					name: first_name
+				})
+			}
+		}
+	}
 	if elem_type_expr_resolved is ast.EmptyExpr && exprs.len > 0 {
 		if arr_type := t.env.get_expr_type(expr.pos.id) {
 			match arr_type {
@@ -889,6 +911,23 @@ fn (mut t Transformer) transform_array_init_expr(expr ast.ArrayInitExpr) ast.Exp
 						elem_type_expr_resolved = ast.Expr(ast.Ident{
 							name: tn
 						})
+						if tn.starts_with('Array_') && tn.ends_with('ptr') {
+							mut first_name := if expr.exprs.len > 0 {
+								t.concrete_array_literal_elem_name(expr.exprs[0])
+							} else {
+								''
+							}
+							if first_name == '' {
+								first_name = t.concrete_array_literal_elem_name(exprs[0])
+							}
+							if first_name != '' && !first_name.starts_with('Array_')
+								&& !first_name.ends_with('*') {
+								elem_type_name = first_name
+								elem_type_expr_resolved = ast.Expr(ast.Ident{
+									name: first_name
+								})
+							}
+						}
 					}
 				}
 				types.ArrayFixed {
@@ -1923,8 +1962,9 @@ fn (mut t Transformer) add_missing_struct_field_defaults(struct_name string, fie
 	}
 	struct_info := base_type as types.Struct
 	default_struct_short_name := if struct_info.name != '' { struct_info.name } else { struct_name }
-	default_struct_name := if default_struct_short_name.contains('__') || type_lookup.module_name == ''
-		|| type_lookup.module_name == 'main' || type_lookup.module_name == 'builtin' {
+	default_struct_name := if default_struct_short_name.contains('__')
+		|| type_lookup.module_name == '' || type_lookup.module_name == 'main'
+		|| type_lookup.module_name == 'builtin' {
 		default_struct_short_name
 	} else {
 		'${type_lookup.module_name}__${default_struct_short_name}'
@@ -2167,7 +2207,7 @@ fn (mut t Transformer) transform_struct_field_default_expr(struct_name string, e
 					old_module := t.cur_module
 					t.cur_module = module_name
 					transformed := t.transform_call_expr(ast.CallExpr{
-						lhs: ast.Ident{
+						lhs:  ast.Ident{
 							name: '${module_name}__${fn_name}'
 							pos:  expr.pos
 						}

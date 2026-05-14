@@ -3161,6 +3161,17 @@ fn (mut g Gen) gen_call_arg(fn_name string, idx int, arg ast.Expr) {
 						g.expr(base_arg)
 						return
 					}
+				}
+				if param_types := g.fn_param_types[fn_name] {
+					if idx < param_types.len {
+						param_base := param_types[idx].trim_right('*')
+						if param_base != '' && param_base != 'void' {
+							g.gen_addr_of_expr(base_arg, param_base)
+							return
+						}
+					}
+				}
+				if raw := g.get_raw_type(base_arg) {
 					c_type := g.types_type_to_c(raw)
 					if c_type != '' {
 						g.gen_addr_of_expr(base_arg, c_type)
