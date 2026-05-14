@@ -1681,31 +1681,15 @@ fn (t &Transformer) type_to_ast_type_expr(typ types.Type) ast.Expr {
 }
 
 // get_error_wrapper_type returns the wrapper type name for IError interface methods.
-// Types that embed Error use 'Error' wrappers; types with custom msg/code use their C type name.
+// Keep the concrete type so `err is SomeError` keeps working for types that
+// embed `Error` but do not define their own msg/code methods.
 fn (t &Transformer) get_error_wrapper_type(type_name string) string {
-	base_name := if type_name.contains('__') {
-		type_name.all_after_last('__')
-	} else {
-		type_name
-	}
-	// The Error struct itself uses Error wrappers
-	if base_name == 'Error' {
-		return 'Error'
-	}
-	// Check if this type has its own msg() method using the type environment
-	// Types with custom msg() need their own wrapper; types without use Error's wrapper
-	if t.lookup_method_cached(type_name, 'msg') != none {
-		// Has custom msg() method - use full type name for wrapper
-		return type_name
-	}
-	// No custom msg() method - use Error's wrapper
-	return 'Error'
+	return t.qualify_type_name(type_name)
 }
 
 // get_c_type_name converts a V type name to C type name format
 fn (t &Transformer) get_c_type_name(type_name string) string {
-	// Already in C format (module__Type) or plain name
-	return type_name
+	return t.qualify_type_name(type_name)
 }
 
 // get_init_expr_type_name extracts the type name from an InitExpr's typ field
@@ -2630,6 +2614,9 @@ fn match_sumtype_variant_name(candidate string, variants []string) string {
 }
 
 fn (t &Transformer) type_to_name(typ types.Type) string {
+	if types.type_name(typ) == '' {
+		return ''
+	}
 	if typ is types.Enum {
 		return typ.name
 	}
@@ -2684,6 +2671,9 @@ fn (t &Transformer) type_to_name(typ types.Type) string {
 		return types.sum_type_name(typ)
 	}
 	inner := typ.base_type()
+	if types.type_name(inner) == '' {
+		return ''
+	}
 	if typ is types.OptionType {
 		return '_option_' + t.type_to_name(inner)
 	}
@@ -3597,6 +3587,9 @@ fn (t &Transformer) get_array_type_str_from_type(typ types.Type) ?string {
 fn (t &Transformer) unwrap_alias_and_pointer_type(typ types.Type) types.Type {
 	mut cur := typ
 	for cur is types.Pointer {
+		if types.type_name(cur) == '' {
+			return types.Type(types.void_)
+		}
 		ptr := cur as types.Pointer
 		cur = ptr.base_type
 	}
@@ -3733,6 +3726,9 @@ fn (t &Transformer) type_constructor_name(typ types.Type) string {
 
 // type_to_c_name converts a types.Type to its C type name string
 fn (t &Transformer) type_to_c_name(typ types.Type) string {
+	if types.type_name(typ) == '' {
+		return ''
+	}
 	match typ {
 		types.Primitive {
 			// Map V primitive types to C type names

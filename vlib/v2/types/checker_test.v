@@ -247,6 +247,22 @@ fn main() {
 	assert has_type(env, 'bool'), 'generic body field lookup should use the active concrete type'
 }
 
+fn test_generic_identity_inference_does_not_recurse_selector_lookup() {
+	p := &pref.Preferences{}
+	mut file_set := token.FileSet.new()
+	mut env := Environment.new()
+	env.cur_generic_types << {
+		'M': Type(NamedType('M'))
+	}
+	mut checker := Checker.new(p, file_set, env)
+	mut type_map := map[string]Type{}
+	checker.add_inferred_generic_type(mut type_map, 'M', Type(NamedType('M'))) or { panic(err) }
+	assert 'M' !in type_map
+	assert checker.resolve_active_generic_named_type(NamedType('M')) == none
+	typ := checker.find_field_or_method(Type(NamedType('M')), 'find_at') or { panic(err) }
+	assert typ is Void
+}
+
 fn test_interface_field_alias_to_function_type_resolves() {
 	code := '
 type Handler = fn ()

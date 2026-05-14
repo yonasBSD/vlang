@@ -783,12 +783,14 @@ fn (mut g Gen) gen_struct_decl(node ast.StructDecl) {
 	if struct_str_fn !in g.fn_return_types {
 		label := '${name}{}'
 		g.sb.writeln('#define ${name}__str(v) ((string){.str = "${label}", .len = ${label.len}, .is_lit = 1})')
+		g.emitted_types['macro_${name}__str'] = true
 		// Register the macro in fn_return_types so method resolution can find it
 		g.fn_return_types[struct_str_fn] = 'string'
 	}
 	struct_short_str_fn := '${name}_str'
 	if struct_short_str_fn !in g.fn_return_types {
 		g.sb.writeln('#define ${name}_str(v) ${name}__str(v)')
+		g.emitted_types['macro_${name}_str'] = true
 	}
 	g.sb.writeln('')
 	// Generate SoA (Structure of Arrays) companion struct and helpers for @[soa] structs

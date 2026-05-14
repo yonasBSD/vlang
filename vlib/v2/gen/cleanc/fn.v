@@ -44,6 +44,51 @@ fn (mut g Gen) is_error_call_expr(expr ast.Expr) bool {
 	return false
 }
 
+fn (mut g Gen) ierror_concrete_base_for_expr(expr ast.Expr) string {
+	mut expr_type := g.get_expr_type(expr)
+	if (expr_type == '' || expr_type == 'int') && expr is ast.Ident {
+		expr_type = g.get_local_var_c_type(expr.name) or { expr_type }
+	}
+	if expr_type == '' || expr_type == 'IError' || expr_type == 'builtin__IError' {
+		return ''
+	}
+	base := expr_type.trim_right('*')
+	if base == '' || base == 'IError' || base == 'builtin__IError' {
+		return ''
+	}
+	if '${base}__msg' in g.fn_return_types {
+		return base
+	}
+	return ''
+}
+
+fn (mut g Gen) gen_ierror_boxed_expr(expr ast.Expr, base string) bool {
+	if base == '' {
+		return false
+	}
+	g.needed_ierror_wrapper_bases[base] = true
+	expr_type := g.get_expr_type(expr)
+	type_short := if base.contains('__') {
+		base.all_after_last('__')
+	} else {
+		base
+	}
+	type_id := interface_type_id_for_name(type_short)
+	g.sb.write_string('({ ')
+	if expr_type.ends_with('*') {
+		g.sb.write_string('IError _ierr = (IError){._object = (void*)(')
+		g.expr(expr)
+		g.sb.write_string('), ._type_id = ${type_id}, .type_name = IError_${base}_type_name_wrapper, .msg = IError_${base}_msg_wrapper, .code = IError_${base}_code_wrapper}; _ierr; })')
+		return true
+	}
+	tmp_name := '_ierr_obj${g.tmp_counter}'
+	g.tmp_counter++
+	g.sb.write_string('${base}* ${tmp_name} = (${base}*)malloc(sizeof(${base})); *${tmp_name} = ')
+	g.expr(expr)
+	g.sb.write_string('; IError _ierr = (IError){._object = (void*)${tmp_name}, ._type_id = ${type_id}, .type_name = IError_${base}_type_name_wrapper, .msg = IError_${base}_msg_wrapper, .code = IError_${base}_code_wrapper}; _ierr; })')
+	return true
+}
+
 pub fn (mut g Gen) set_cached_init_calls(calls []string) {
 	g.cached_init_calls = calls.clone()
 }
@@ -52,7 +97,7 @@ pub fn (mut g Gen) set_used_fn_keys(used map[string]bool) {
 	g.used_fn_keys = used.clone()
 }
 
-fn (g &Gen) should_emit_fn_decl(module_name string, decl ast.FnDecl) bool {
+fn (mut g Gen) should_emit_fn_decl(module_name string, decl ast.FnDecl) bool {
 	if g.cached_init_calls.len > 0 && !g.should_emit_module(module_name) {
 		return true
 	}
@@ -105,11 +150,11 @@ fn (g &Gen) should_emit_fn_decl(module_name string, decl ast.FnDecl) bool {
 		return true
 	}
 	if module_name == 'printer'
-		&& decl.name in ['new', 'requires_stats', 'requires_path', 'path', 'inactive', 'begin', 'finish', 'find_iter_at_in_context', 'trim_line_terminator', 'add_matches', 'add_matched_lines', 'add_elapsed', 'add_searches', 'add_searches_with_match', 'add_bytes_searched', 'add_bytes_printed', 'quit_early', 'str', 'fractional_seconds', 'as_bytes', 'matches', 'merge_into', 'clear', 'set_fg', 'set_bg', 'set_bold', 'set_intense', 'set_underline', 'set_italic', 'host_value', 'wsl_prefix_value'] {
+		&& decl.name in ['new', 'default_summary_config', 'requires_stats', 'requires_path', 'path', 'inactive', 'begin', 'finish', 'find_iter_at_in_context', 'trim_line_terminator', 'add_matches', 'add_matched_lines', 'add_elapsed', 'add_searches', 'add_searches_with_match', 'add_bytes_searched', 'add_bytes_printed', 'quit_early', 'str', 'fractional_seconds', 'as_bytes', 'matches', 'merge_into', 'clear', 'set_fg', 'set_bg', 'set_bold', 'set_intense', 'set_underline', 'set_italic', 'host_value', 'wsl_prefix_value'] {
 		return true
 	}
 	if module_name == 'matcher'
-		&& decl.name in ['as_bytes', 'start', 'end', 'with_end', 'is_suffix', 'is_crlf', 'as_byte', 'find_iter_at'] {
+		&& decl.name in ['default', 'byte', 'as_bytes', 'start', 'end', 'with_end', 'is_suffix', 'is_crlf', 'as_byte', 'find_iter_at', 'byte_set_contains'] {
 		return true
 	}
 	if module_name == 'searcher'
@@ -117,7 +162,7 @@ fn (g &Gen) should_emit_fn_decl(module_name string, decl ast.FnDecl) bool {
 		return true
 	}
 	if module_name == 'log'
-		&& decl.name in ['debug', 'fatal', 'error', 'warn', 'info', 'set_level', 'set_always_flush', 'free', 'send_output', 'log_file', 'log_stream', 'time_format', 'tag_to_file', 'tag_to_console', 'flush'] {
+		&& decl.name in ['debug', 'fatal', 'error', 'warn', 'info', 'get_level', 'set_level', 'set_always_flush', 'free', 'send_output', 'log_file', 'log_stream', 'time_format', 'tag_to_file', 'tag_to_console', 'flush'] {
 		return true
 	}
 	if module_name == 'sync'
@@ -134,6 +179,16 @@ fn (g &Gen) should_emit_fn_decl(module_name string, decl ast.FnDecl) bool {
 	// which runs after markused, so they won't be in used_fn_keys.
 	if decl.name == 'init' || decl.name == 'deinit' {
 		return true
+	}
+	if decl.is_method || decl.is_static {
+		fn_name := g.get_fn_name(decl)
+		if fn_name != '' {
+			for _, spec in g.interface_wrapper_specs {
+				if spec.fn_name == fn_name {
+					return true
+				}
+			}
+		}
 	}
 	// Methods on array types ([]T) and other types with unresolvable receivers
 	// may produce 'unknown' receiver in the markused key, causing them to be
@@ -463,6 +518,7 @@ fn (mut g Gen) collect_fn_signatures() {
 							g.active_generic_c_names = prev_gc.clone()
 							continue
 						}
+						continue
 					}
 					mut fn_name := ''
 					if stmt.stmts.len == 0 && stmt.language == .c {
@@ -730,11 +786,17 @@ fn (mut g Gen) get_receiver_generic_bindings(node ast.FnDecl) ?map[string]types.
 	recv_c_name := g.receiver_generic_base_c_name(node)
 	if instances := g.generic_struct_instances[recv_c_name] {
 		if instances.len > 0 {
-			return g.primary_generic_struct_instance(recv_c_name, instances).bindings
+			bindings := g.primary_generic_struct_instance(recv_c_name, instances).bindings
+			if g.generic_bindings_have_complete_c_types(bindings) {
+				return bindings
+			}
 		}
 	}
 	if recv_c_name in g.generic_struct_bindings {
-		return g.generic_struct_bindings[recv_c_name]
+		bindings := g.generic_struct_bindings[recv_c_name].clone()
+		if g.generic_bindings_have_complete_c_types(bindings) {
+			return bindings
+		}
 	}
 	// Also try with current module prefix
 	if !recv_c_name.contains('__') && g.cur_module != '' && g.cur_module != 'main'
@@ -742,14 +804,33 @@ fn (mut g Gen) get_receiver_generic_bindings(node ast.FnDecl) ?map[string]types.
 		qualified := '${g.cur_module}__${recv_c_name}'
 		if instances := g.generic_struct_instances[qualified] {
 			if instances.len > 0 {
-				return g.primary_generic_struct_instance(qualified, instances).bindings
+				bindings := g.primary_generic_struct_instance(qualified, instances).bindings
+				if g.generic_bindings_have_complete_c_types(bindings) {
+					return bindings
+				}
 			}
 		}
 		if qualified in g.generic_struct_bindings {
-			return g.generic_struct_bindings[qualified]
+			bindings := g.generic_struct_bindings[qualified].clone()
+			if g.generic_bindings_have_complete_c_types(bindings) {
+				return bindings
+			}
 		}
 	}
 	return none
+}
+
+fn (mut g Gen) generic_bindings_have_complete_c_types(bindings map[string]types.Type) bool {
+	for _, typ in bindings {
+		c_name := g.types_type_to_c(typ)
+		if c_name == '' {
+			return false
+		}
+		if g.type_is_uninstantiated_generic_struct(typ) && !g.c_type_complete_for_sizeof(c_name) {
+			return false
+		}
+	}
+	return true
 }
 
 // get_all_receiver_generic_bindings returns ALL concrete type binding sets for a method
@@ -769,7 +850,9 @@ fn (mut g Gen) get_all_receiver_generic_bindings(node ast.FnDecl) []map[string]t
 		if instances.len > 0 {
 			mut all_bindings := []map[string]types.Type{cap: instances.len}
 			for inst in instances {
-				all_bindings << inst.bindings.clone()
+				if g.generic_bindings_have_complete_c_types(inst.bindings) {
+					all_bindings << inst.bindings.clone()
+				}
 			}
 			return all_bindings
 		}
@@ -780,7 +863,9 @@ fn (mut g Gen) get_all_receiver_generic_bindings(node ast.FnDecl) []map[string]t
 			if instances.len > 0 {
 				mut all_bindings := []map[string]types.Type{cap: instances.len}
 				for inst in instances {
-					all_bindings << inst.bindings.clone()
+					if g.generic_bindings_have_complete_c_types(inst.bindings) {
+						all_bindings << inst.bindings.clone()
+					}
 				}
 				return all_bindings
 			}
@@ -917,7 +1002,7 @@ fn generic_param_names(params []ast.Expr) []string {
 	return names
 }
 
-fn (g &Gen) fallback_generic_bindings_for_names(param_names []string) ?map[string]types.Type {
+fn (mut g Gen) fallback_generic_bindings_for_names(param_names []string) ?map[string]types.Type {
 	if param_names.len == 0 || g.env == unsafe { nil } {
 		return none
 	}
@@ -927,7 +1012,8 @@ fn (g &Gen) fallback_generic_bindings_for_names(param_names []string) ?map[strin
 		for _, generic_maps in g.env.generic_types {
 			for generic_types in generic_maps {
 				concrete := generic_types[param_name] or { continue }
-				if concrete.name() == param_name || type_contains_generic_placeholder(concrete) {
+				if concrete.name() == param_name || type_contains_generic_placeholder(concrete)
+					|| g.type_is_uninstantiated_generic_struct(concrete) {
 					continue
 				}
 				bindings[param_name] = concrete
@@ -970,7 +1056,8 @@ fn (mut g Gen) generic_fn_specializations(node ast.FnDecl) []GenericFnSpecializa
 					skip_spec = true
 					break
 				}
-				if concrete.name() == param_name || type_contains_generic_placeholder(concrete) {
+				if concrete.name() == param_name || type_contains_generic_placeholder(concrete)
+					|| g.type_is_uninstantiated_generic_struct(concrete) {
 					skip_spec = true
 					break
 				}
@@ -1015,7 +1102,8 @@ fn (mut g Gen) generic_fn_specializations(node ast.FnDecl) []GenericFnSpecializa
 		for _, generic_maps in g.env.generic_types {
 			for generic_types in generic_maps {
 				concrete := generic_types[param_name] or { continue }
-				if concrete.name() == param_name || type_contains_generic_placeholder(concrete) {
+				if concrete.name() == param_name || type_contains_generic_placeholder(concrete)
+					|| g.type_is_uninstantiated_generic_struct(concrete) {
 					continue
 				}
 				fallback_types[concrete.name()] = concrete
@@ -1025,7 +1113,8 @@ fn (mut g Gen) generic_fn_specializations(node ast.FnDecl) []GenericFnSpecializa
 		for _, late_maps in g.late_generic_specs {
 			for late_spec in late_maps {
 				concrete := late_spec[param_name] or { continue }
-				if concrete.name() == param_name || type_contains_generic_placeholder(concrete) {
+				if concrete.name() == param_name || type_contains_generic_placeholder(concrete)
+					|| g.type_is_uninstantiated_generic_struct(concrete) {
 					continue
 				}
 				fallback_types[concrete.name()] = concrete
@@ -1693,6 +1782,7 @@ fn (mut g Gen) gen_fn_decl_ptr(node &ast.FnDecl) {
 			g.active_generic_c_names = prev_generic_c_names.clone()
 			return
 		}
+		return
 	}
 
 	fn_name := g.get_fn_name(*node)
@@ -2752,6 +2842,13 @@ fn extract_fn_type(raw_type types.Type) ?types.FnType {
 // fn_pointer_param_is_ptr extracts parameter pointer-ness from a fn-pointer type.
 // Returns an array of bools (true = param expects pointer, false = by value).
 fn (mut g Gen) fn_pointer_param_is_ptr(expr ast.Expr) []bool {
+	if expr is ast.Ident {
+		if local_type := g.get_local_var_c_type(expr.name) {
+			if local_type.contains('(*)') {
+				return c_fn_pointer_param_is_ptr(local_type)
+			}
+		}
+	}
 	raw_type := g.get_raw_type(expr) or { return []bool{} }
 	fn_type := extract_fn_type(raw_type) or { return []bool{} }
 	param_types := fn_type.get_param_types()
@@ -2761,6 +2858,44 @@ fn (mut g Gen) fn_pointer_param_is_ptr(expr ast.Expr) []bool {
 		result << (c_name.ends_with('*') || pt is types.Pointer)
 	}
 	return result
+}
+
+fn c_fn_pointer_param_is_ptr(c_type string) []bool {
+	marker_index := c_type.index('(*)') or { return []bool{} }
+	after_marker := c_type[marker_index + 3..].trim_space()
+	if !after_marker.starts_with('(') || !after_marker.ends_with(')') {
+		return []bool{}
+	}
+	params := after_marker[1..after_marker.len - 1].trim_space()
+	if params == '' || params == 'void' {
+		return []bool{}
+	}
+	mut result := []bool{}
+	for param in split_c_fn_pointer_params(params) {
+		trimmed := param.trim_space()
+		result << (trimmed.ends_with('*') || trimmed.contains('(*)'))
+	}
+	return result
+}
+
+fn split_c_fn_pointer_params(params string) []string {
+	mut out := []string{}
+	mut start := 0
+	mut depth := 0
+	for i, ch in params {
+		if ch == `(` || ch == `[` {
+			depth++
+		} else if ch == `)` || ch == `]` {
+			if depth > 0 {
+				depth--
+			}
+		} else if ch == `,` && depth == 0 {
+			out << params[start..i]
+			start = i + 1
+		}
+	}
+	out << params[start..]
+	return out
 }
 
 fn (mut g Gen) should_auto_deref(arg ast.Expr) bool {
@@ -2875,6 +3010,47 @@ fn (mut g Gen) gen_call_arg(fn_name string, idx int, arg ast.Expr) {
 		if base_arg is ast.Ident && base_arg.name == 'nil' {
 			g.sb.write_string('NULL')
 			return
+		}
+	}
+	if param_types := g.fn_param_types[fn_name] {
+		if idx < param_types.len {
+			param_type := param_types[idx]
+			param_base := param_type.trim_right('*')
+			if param_type.ends_with('*') && g.is_interface_type(param_base) {
+				mut arg_type := g.get_expr_type(base_arg).trim_space()
+				if (arg_type == '' || arg_type == 'int') && base_arg is ast.Ident {
+					arg_type = (g.get_local_var_c_type(base_arg.name) or { '' }).trim_space()
+				}
+				mut raw_arg_type := ''
+				if raw := g.get_raw_type(base_arg) {
+					raw_arg_type = g.types_type_to_c(raw).trim_space()
+					if arg_type == '' || arg_type == 'int' {
+						arg_type = raw_arg_type
+					}
+				}
+				arg_base := arg_type.trim_right('*')
+				raw_arg_base := raw_arg_type.trim_right('*')
+				if arg_base == param_base {
+					if raw_arg_base != '' && raw_arg_base != 'int' && raw_arg_base != param_base {
+						if g.gen_heap_interface_cast(param_base, base_arg) {
+							return
+						}
+					}
+					if arg_type.ends_with('*') {
+						g.expr(base_arg)
+						return
+					}
+					if g.can_take_address(base_arg) {
+						g.sb.write_string('&')
+						g.expr(base_arg)
+						return
+					}
+				} else if arg_base != '' && arg_base != 'int' {
+					if g.gen_heap_interface_cast(param_base, base_arg) {
+						return
+					}
+				}
+			}
 		}
 	}
 	if fn_name == 'new_map_init_noscan_value' && idx in [7, 8] {
@@ -4748,6 +4924,23 @@ fn (mut g Gen) call_expr(lhs ast.Expr, args []ast.Expr) {
 				continue
 			}
 			// For fn-pointer calls, auto-deref mut params when the fn type expects by-value
+			if fnptr_param_is_ptr.len > 0 && i < fnptr_param_is_ptr.len && fnptr_param_is_ptr[i] {
+				arg := call_args[i]
+				base_arg := if arg is ast.ModifierExpr {
+					arg.expr
+				} else {
+					arg
+				}
+				if g.expr_is_pointer(base_arg) || g.expr_produces_pointer(base_arg) {
+					g.expr(base_arg)
+					continue
+				}
+				if g.can_take_address(base_arg) {
+					g.sb.write_string('&')
+					g.expr(base_arg)
+					continue
+				}
+			}
 			if fnptr_param_is_ptr.len > 0 && i < fnptr_param_is_ptr.len && !fnptr_param_is_ptr[i] {
 				arg := call_args[i]
 				mut arg_ident_name := ''

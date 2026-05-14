@@ -25,6 +25,41 @@ fn is_numeric_literal_expr(expr ast.Expr) bool {
 	}
 }
 
+fn ast_expr_raw_array_type_elem(expr ast.Expr) (ast.Expr, bool) {
+	if expr is ast.Type {
+		typ := expr as ast.Type
+		if typ is ast.ArrayType {
+			return typ.elem_type, true
+		}
+	}
+	expr_tag := unsafe { (&u64(&expr))[0] }
+	// ast.Expr Type variant in the native sumtype layout.
+	if expr_tag != 38 {
+		return ast.empty_expr, false
+	}
+	type_data := unsafe { (&u64(&expr))[1] }
+	if type_data == 0 {
+		return ast.empty_expr, false
+	}
+	type_words := unsafe { &u64(voidptr(type_data)) }
+	type_tag := unsafe { type_words[0] }
+	// ast.Type ArrayType variant in the native sumtype layout.
+	if type_tag != 2 {
+		return ast.empty_expr, false
+	}
+	array_data := unsafe { type_words[1] }
+	if array_data == 0 {
+		return ast.empty_expr, false
+	}
+	array_words := unsafe { &u64(voidptr(array_data)) }
+	mut elem_type := ast.empty_expr
+	unsafe {
+		(&u64(&elem_type))[0] = array_words[0]
+		(&u64(&elem_type))[1] = array_words[1]
+	}
+	return elem_type, true
+}
+
 fn (mut t Transformer) synth_selector(lhs ast.Expr, field_name string, typ types.Type) ast.Expr {
 	pos := t.next_synth_pos()
 	t.register_synth_type(pos, typ)
@@ -622,6 +657,10 @@ fn (mut t Transformer) transform_array_init_expr(expr ast.ArrayInitExpr) ast.Exp
 		} else if expr.typ is ast.ArrayType {
 			elem_type_expr = expr.typ.elem_type
 		}
+	}
+	raw_elem_type, has_raw_array_type := ast_expr_raw_array_type_elem(expr.typ)
+	if elem_type_expr is ast.EmptyExpr && has_raw_array_type {
+		elem_type_expr = raw_elem_type
 	}
 	// For untyped `[]` literals, use checker-inferred type from context (assign/call/return).
 	if array_typ is ast.EmptyExpr {
@@ -2462,7 +2501,13 @@ fn (t &Transformer) get_field_array_elem_c_name(struct_name string, field_name s
 }
 
 fn (t &Transformer) field_type_from_struct_like_type(typ types.Type, field_name string) ?types.Type {
+	if types.type_name(typ) == '' {
+		return none
+	}
 	base_type := t.unwrap_alias_and_pointer_type(typ)
+	if types.type_name(base_type) == '' {
+		return none
+	}
 	match base_type {
 		types.Struct {
 			for field in base_type.fields {
@@ -2472,7 +2517,13 @@ fn (t &Transformer) field_type_from_struct_like_type(typ types.Type, field_name 
 			}
 		}
 		types.Alias {
+			if types.type_name(base_type.base_type) == '' {
+				return none
+			}
 			alias_base := t.unwrap_alias_and_pointer_type(base_type.base_type)
+			if types.type_name(alias_base) == '' {
+				return none
+			}
 			if alias_base is types.Struct {
 				for field in alias_base.fields {
 					if field.name == field_name {

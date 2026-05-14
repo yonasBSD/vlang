@@ -71,6 +71,9 @@ fn type_contains_generic_placeholder(typ types.Type) bool {
 		types.Pointer {
 			return type_contains_generic_placeholder(typ.base_type)
 		}
+		types.Struct {
+			return typ.generic_params.len > 0
+		}
 		types.Alias {
 			return type_contains_generic_placeholder(typ.base_type)
 		}
@@ -89,6 +92,45 @@ fn type_contains_generic_placeholder(typ types.Type) bool {
 			return false
 		}
 	}
+}
+
+fn (mut g Gen) type_is_uninstantiated_generic_struct(typ types.Type) bool {
+	c_name := g.types_type_to_c(typ)
+	if c_name == '' || c_name in primitive_types {
+		return false
+	}
+	st := g.lookup_struct_type_by_c_name(c_name)
+	return st.generic_params.len > 0
+}
+
+fn (g &Gen) c_type_complete_for_sizeof(ctype string) bool {
+	base := ctype.trim_right('*')
+	if base == '' {
+		return false
+	}
+	if ctype.ends_with('*') {
+		return true
+	}
+	if base in primitive_types || base in ['bool', 'char', 'void*', 'u8*', 'char*'] {
+		return true
+	}
+	if base == 'string' || base == 'builtin__string' {
+		return 'body_string' in g.emitted_types || 'body_builtin__string' in g.emitted_types
+	}
+	if base == 'array' || base.starts_with('Array_') || base in g.array_aliases {
+		return 'body_array' in g.emitted_types
+	}
+	if base == 'map' || base.starts_with('Map_') || base in g.map_aliases {
+		return 'body_map' in g.emitted_types
+	}
+	if base.starts_with('_option_') {
+		return base in g.emitted_option_structs
+	}
+	if base.starts_with('_result_') {
+		return base in g.emitted_result_structs
+	}
+	return 'body_${base}' in g.emitted_types || 'enum_${base}' in g.emitted_types
+		|| 'alias_${base}' in g.emitted_types
 }
 
 fn sanitize_generic_token_part(name string) string {
@@ -502,6 +544,73 @@ fn (mut g Gen) collect_decl_type_aliases_from_stmt(stmt ast.Stmt) {
 
 fn is_generic_placeholder_type_name(name string) bool {
 	return name in ['T', 'K', 'V'] || (name.len == 1 && name[0] >= `A` && name[0] <= `Z`)
+}
+
+fn (mut g Gen) generic_expr_contains_unresolved_placeholder(e ast.Expr) bool {
+	match e {
+		ast.Ident {
+			if !is_generic_placeholder_type_name(e.name) {
+				return false
+			}
+			concrete := g.resolve_active_generic_type(e.name) or { return true }
+			return type_contains_generic_placeholder(concrete)
+		}
+		ast.PrefixExpr {
+			return g.generic_expr_contains_unresolved_placeholder(e.expr)
+		}
+		ast.ModifierExpr {
+			return g.generic_expr_contains_unresolved_placeholder(e.expr)
+		}
+		ast.GenericArgOrIndexExpr {
+			return g.generic_expr_contains_unresolved_placeholder(e.expr)
+		}
+		ast.GenericArgs {
+			for arg in e.args {
+				if g.generic_expr_contains_unresolved_placeholder(arg) {
+					return true
+				}
+			}
+			return false
+		}
+		ast.Type {
+			match e {
+				ast.ArrayType {
+					return g.generic_expr_contains_unresolved_placeholder(e.elem_type)
+				}
+				ast.ArrayFixedType {
+					return g.generic_expr_contains_unresolved_placeholder(e.elem_type)
+						|| g.generic_expr_contains_unresolved_placeholder(e.len)
+				}
+				ast.MapType {
+					return g.generic_expr_contains_unresolved_placeholder(e.key_type)
+						|| g.generic_expr_contains_unresolved_placeholder(e.value_type)
+				}
+				ast.OptionType {
+					return g.generic_expr_contains_unresolved_placeholder(e.base_type)
+				}
+				ast.ResultType {
+					return g.generic_expr_contains_unresolved_placeholder(e.base_type)
+				}
+				ast.PointerType {
+					return g.generic_expr_contains_unresolved_placeholder(e.base_type)
+				}
+				ast.GenericType {
+					for param in e.params {
+						if g.generic_expr_contains_unresolved_placeholder(param) {
+							return true
+						}
+					}
+					return false
+				}
+				else {
+					return false
+				}
+			}
+		}
+		else {
+			return false
+		}
+	}
 }
 
 fn generic_placeholder_c_type_name(name string) string {
@@ -2781,6 +2890,9 @@ fn (mut g Gen) record_generic_struct_bindings(struct_base_name string, struct_c_
 	mut param_c_names := []string{cap: concrete_runtime_params.len}
 	for i, param_name in generic_param_names {
 		concrete_expr := concrete_runtime_params[i]
+		if g.generic_expr_contains_unresolved_placeholder(concrete_expr) {
+			return
+		}
 		expr_name := concrete_expr.name()
 		if is_generic_placeholder_type_name(expr_name) {
 			if concrete_type := g.active_generic_types[expr_name] {
@@ -2856,12 +2968,18 @@ fn (mut g Gen) record_generic_struct_bindings_with_parent(struct_base_name strin
 		expr_name := concrete_expr.name()
 		if is_generic_placeholder_type_name(expr_name) {
 			if parent_type := parent_bindings[expr_name] {
+				if type_contains_generic_placeholder(parent_type) {
+					return
+				}
 				concrete_c_name := g.types_type_to_c(parent_type)
 				bindings[param_name] = parent_type
 				c_bindings[param_name] = concrete_c_name
 				param_c_names << concrete_c_name
 				continue
 			}
+			return
+		}
+		if g.generic_expr_contains_unresolved_placeholder(concrete_expr) {
 			return
 		}
 		concrete_c_name := g.expr_type_to_c(concrete_expr)
@@ -4038,7 +4156,7 @@ fn (mut g Gen) selector_field_type(sel ast.SelectorExpr) string {
 		return lane_type
 	}
 	if env_type.starts_with('_result_') || env_type.starts_with('_option_') {
-		return ''
+		return env_type
 	}
 	return env_type
 }

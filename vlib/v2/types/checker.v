@@ -390,8 +390,9 @@ mut:
 	// are no longer allowed & removed.
 	expecting_method bool
 	// Temporary recursion guard for debugging expression cycles.
-	expr_depth int
-	expr_stack []string
+	expr_depth                int
+	expr_stack                []string
+	field_method_lookup_stack []string
 	// Whether we are inside an unsafe{} block
 	inside_unsafe bool
 	// Ownership tracking: variables that hold owned values (from .to_owned())
@@ -889,7 +890,22 @@ fn (mut c Checker) decl(decl ast.Stmt) {
 			for field in decl.fields {
 				mut field_type := Type(int_)
 				if field.typ !is ast.EmptyExpr {
-					field_type = c.type_expr(field.typ)
+					field_type = if field.typ is ast.Type {
+						field_type_node := field.typ as ast.Type
+						if field_type_node is ast.FnType {
+							Type(c.fn_type(field_type_node, FnTypeAttribute.empty))
+						} else if field_type_node is ast.PointerType {
+							ptr_type := field_type_node as ast.PointerType
+							Type(Pointer{
+								base_type: c.type_expr(ptr_type.base_type)
+								lifetime:  ptr_type.lifetime
+							})
+						} else {
+							c.type_node_expr(field_type_node)
+						}
+					} else {
+						c.type_expr(field.typ)
+					}
 				} else if field.value !is ast.EmptyExpr {
 					field_type = c.expr(field.value)
 				}
@@ -1419,7 +1435,20 @@ fn (mut c Checker) init_expr(expr ast.InitExpr) Type {
 	// if expr.typ is ast.GenericArgs {
 	// 	typ_expr = expr.typ.lhs
 	// }
-	typ := c.expr(expr.typ)
+	typ := if expr.typ is ast.Type {
+		type_node := expr.typ as ast.Type
+		if type_node is ast.MapType {
+			map_type := type_node as ast.MapType
+			Type(Map{
+				key_type:   c.direct_type_expr(map_type.key_type)
+				value_type: c.direct_type_expr(map_type.value_type)
+			})
+		} else {
+			c.type_node_expr(type_node)
+		}
+	} else {
+		c.expr(expr.typ)
+	}
 	// Unwrap aliases to get the base struct type for field lookups.
 	mut resolved := resolve_alias(typ)
 	// Visit field value expressions to store their types in the environment
@@ -1498,7 +1527,20 @@ fn (mut c Checker) map_init_expr(expr ast.MapInitExpr) Type {
 	mut inferred_from_first_entry := false
 	// `map[type]type{...}`
 	if expr.typ !is ast.EmptyExpr {
-		typ = c.expr(expr.typ)
+		typ = if expr.typ is ast.Type {
+			type_node := expr.typ as ast.Type
+			if type_node is ast.MapType {
+				map_type := type_node as ast.MapType
+				Type(Map{
+					key_type:   c.direct_type_expr(map_type.key_type)
+					value_type: c.direct_type_expr(map_type.value_type)
+				})
+			} else {
+				c.type_node_expr(type_node)
+			}
+		} else {
+			c.expr(expr.typ)
+		}
 		if map_typ := unwrap_map_type(typ) {
 			map_key_type = map_typ.key_type
 			map_value_type = map_typ.value_type
@@ -1797,6 +1839,33 @@ fn (mut c Checker) expr_impl(expr ast.Expr) Type {
 					}
 				}
 			}
+			if expr.typ is ast.Type {
+				typ_node := expr.typ as ast.Type
+				if typ_node is ast.ArrayType {
+					arr_type := typ_node as ast.ArrayType
+					elem_type := c.direct_type_expr(arr_type.elem_type)
+					return Array{
+						elem_type: elem_type
+					}
+				}
+				if typ_node is ast.ArrayFixedType {
+					arr_fixed_type := typ_node as ast.ArrayFixedType
+					mut arr_len := 0
+					if arr_fixed_type.len is ast.BasicLiteral {
+						if arr_fixed_type.len.kind == .number {
+							arr_len = int(strconv.parse_int(arr_fixed_type.len.value, 0, 64) or {
+								0
+							})
+						}
+					}
+					elem_type := c.direct_type_expr(arr_fixed_type.elem_type)
+					return ArrayFixed{
+						len:       arr_len
+						elem_type: elem_type
+					}
+				}
+				return c.type_node_expr(typ_node)
+			}
 			return c.expr(expr.typ)
 		}
 		ast.AsCastExpr {
@@ -2059,7 +2128,7 @@ fn (mut c Checker) expr_impl(expr ast.Expr) Type {
 			// if expr.expr !is ast.Ident && expr.expr !is ast.Type {
 			// 	panic('not ident: ${expr.expr.type_name()}')
 			// }
-			return c.expr(expr.expr)
+			return c.direct_type_expr(expr.expr)
 		}
 		ast.OrExpr {
 			return c.or_expr(expr)
@@ -2130,6 +2199,118 @@ fn (mut c Checker) expr_impl(expr ast.Expr) Type {
 			}
 		}
 		ast.Type {
+			if expr is ast.ArrayType {
+				arr_type := expr as ast.ArrayType
+				elem_type := c.direct_type_expr(arr_type.elem_type)
+				return Array{
+					elem_type: elem_type
+				}
+			}
+			if expr is ast.ArrayFixedType {
+				arr_fixed_type := expr as ast.ArrayFixedType
+				mut len := 0
+				if arr_fixed_type.len is ast.BasicLiteral {
+					if arr_fixed_type.len.kind == .number {
+						len = int(strconv.parse_int(arr_fixed_type.len.value, 0, 64) or { 0 })
+					}
+				} else if arr_fixed_type.len is ast.Ident {
+					if obj := c.scope.lookup_parent(arr_fixed_type.len.name, 0) {
+						if obj is Const {
+							len = obj.int_val
+						}
+					}
+				}
+				elem_type := c.direct_type_expr(arr_fixed_type.elem_type)
+				return ArrayFixed{
+					len:       len
+					elem_type: elem_type
+				}
+			}
+			if expr is ast.FnType {
+				return Type(c.fn_type(expr, FnTypeAttribute.empty))
+			}
+			if expr is ast.OptionType {
+				opt_type := expr as ast.OptionType
+				base_type := if opt_type.base_type is ast.Type {
+					base_type_node := opt_type.base_type as ast.Type
+					if base_type_node is ast.ArrayType {
+						arr_type := base_type_node as ast.ArrayType
+						elem_type := c.direct_type_expr(arr_type.elem_type)
+						Type(Array{
+							elem_type: elem_type
+						})
+					} else if base_type_node is ast.FnType {
+						Type(c.fn_type(base_type_node, FnTypeAttribute.empty))
+					} else {
+						c.type_node_expr(base_type_node)
+					}
+				} else {
+					c.type_expr(opt_type.base_type)
+				}
+				return OptionType{
+					base_type: base_type
+				}
+			}
+			if expr is ast.PointerType {
+				ptr_type := expr as ast.PointerType
+				base_type := if ptr_type.base_type is ast.Type {
+					base_type_node := ptr_type.base_type as ast.Type
+					if base_type_node is ast.ArrayType {
+						arr_type := base_type_node as ast.ArrayType
+						elem_type := c.direct_type_expr(arr_type.elem_type)
+						Type(Array{
+							elem_type: elem_type
+						})
+					} else if base_type_node is ast.ArrayFixedType {
+						arr_fixed_type := base_type_node as ast.ArrayFixedType
+						mut len := 0
+						if arr_fixed_type.len is ast.BasicLiteral {
+							if arr_fixed_type.len.kind == .number {
+								len = int(strconv.parse_int(arr_fixed_type.len.value, 0, 64) or {
+									0
+								})
+							}
+						}
+						elem_type := c.direct_type_expr(arr_fixed_type.elem_type)
+						Type(ArrayFixed{
+							len:       len
+							elem_type: elem_type
+						})
+					} else if base_type_node is ast.FnType {
+						Type(c.fn_type(base_type_node, FnTypeAttribute.empty))
+					} else {
+						c.type_node_expr(base_type_node)
+					}
+				} else {
+					c.type_expr(ptr_type.base_type)
+				}
+				return Pointer{
+					base_type: base_type
+					lifetime:  ptr_type.lifetime
+				}
+			}
+			if expr is ast.ResultType {
+				res_type := expr as ast.ResultType
+				base_type := if res_type.base_type is ast.Type {
+					base_type_node := res_type.base_type as ast.Type
+					if base_type_node is ast.ArrayType {
+						arr_type := base_type_node as ast.ArrayType
+						elem_type := c.direct_type_expr(arr_type.elem_type)
+						Type(Array{
+							elem_type: elem_type
+						})
+					} else if base_type_node is ast.FnType {
+						Type(c.fn_type(base_type_node, FnTypeAttribute.empty))
+					} else {
+						c.type_node_expr(base_type_node)
+					}
+				} else {
+					c.type_expr(res_type.base_type)
+				}
+				return ResultType{
+					base_type: base_type
+				}
+			}
 			return c.type_node_expr(expr)
 		}
 		ast.UnsafeExpr {
@@ -2140,7 +2321,11 @@ fn (mut c Checker) expr_impl(expr ast.Expr) Type {
 			last_expr_idx := trailing_expr_stmt_index(expr.stmts)
 			if last_expr_idx >= 0 {
 				last_stmt := expr.stmts[last_expr_idx] as ast.ExprStmt
-				ret := c.expr(last_stmt.expr)
+				ret := if last_stmt.expr is ast.Type {
+					c.direct_type_expr(last_stmt.expr)
+				} else {
+					c.expr(last_stmt.expr)
+				}
 				c.inside_unsafe = prev_inside_unsafe
 				return ret
 			}
@@ -2184,6 +2369,9 @@ fn (c &Checker) lookup_type_in_scope_chain(name string) ?Type {
 }
 
 fn (mut c Checker) type_expr(expr ast.Expr) Type {
+	if expr is ast.Type {
+		return c.type_node_expr(expr)
+	}
 	resolved := c.resolve_expr(expr)
 	match resolved {
 		ast.Ident {
@@ -2220,11 +2408,80 @@ fn (mut c Checker) type_expr(expr ast.Expr) Type {
 	return c.expr(resolved)
 }
 
+fn (mut c Checker) direct_type_expr(expr ast.Expr) Type {
+	if expr is ast.Type {
+		type_node := expr as ast.Type
+		if type_node is ast.ArrayType {
+			arr_type := type_node as ast.ArrayType
+			return Array{
+				elem_type: c.direct_type_expr(arr_type.elem_type)
+			}
+		}
+		if type_node is ast.ArrayFixedType {
+			arr_fixed_type := type_node as ast.ArrayFixedType
+			mut len := 0
+			if arr_fixed_type.len is ast.BasicLiteral {
+				if arr_fixed_type.len.kind == .number {
+					len = int(strconv.parse_int(arr_fixed_type.len.value, 0, 64) or { 0 })
+				}
+			} else if arr_fixed_type.len is ast.Ident {
+				if obj := c.scope.lookup_parent(arr_fixed_type.len.name, 0) {
+					if obj is Const {
+						len = obj.int_val
+					}
+				}
+			}
+			return ArrayFixed{
+				len:       len
+				elem_type: c.direct_type_expr(arr_fixed_type.elem_type)
+			}
+		}
+		if type_node is ast.MapType {
+			map_type := type_node as ast.MapType
+			return Map{
+				key_type:   c.direct_type_expr(map_type.key_type)
+				value_type: c.direct_type_expr(map_type.value_type)
+			}
+		}
+		if type_node is ast.NilType {
+			return Type(nil_)
+		}
+		if type_node is ast.NoneType {
+			return Type(none_)
+		}
+		if type_node is ast.OptionType {
+			opt_type := type_node as ast.OptionType
+			return OptionType{
+				base_type: c.direct_type_expr(opt_type.base_type)
+			}
+		}
+		if type_node is ast.PointerType {
+			ptr_type := type_node as ast.PointerType
+			return Pointer{
+				base_type: c.direct_type_expr(ptr_type.base_type)
+				lifetime:  ptr_type.lifetime
+			}
+		}
+		if type_node is ast.ResultType {
+			res_type := type_node as ast.ResultType
+			return ResultType{
+				base_type: c.direct_type_expr(res_type.base_type)
+			}
+		}
+		if type_node is ast.FnType {
+			return Type(c.fn_type(type_node, FnTypeAttribute.empty))
+		}
+		return c.type_node_expr(type_node)
+	}
+	return c.type_expr(expr)
+}
+
 fn (mut c Checker) type_node_expr(type_expr ast.Type) Type {
 	if type_expr is ast.ArrayType {
 		arr_type := type_expr as ast.ArrayType
+		elem_type := c.direct_type_expr(arr_type.elem_type)
 		return Array{
-			elem_type: c.type_expr(arr_type.elem_type)
+			elem_type: elem_type
 		}
 	}
 	if type_expr is ast.ArrayFixedType {
@@ -2241,9 +2498,10 @@ fn (mut c Checker) type_node_expr(type_expr ast.Type) Type {
 				}
 			}
 		}
+		elem_type := c.direct_type_expr(arr_fixed_type.elem_type)
 		return ArrayFixed{
 			len:       len
-			elem_type: c.type_expr(arr_fixed_type.elem_type)
+			elem_type: elem_type
 		}
 	}
 	if type_expr is ast.ChannelType {
@@ -2269,8 +2527,8 @@ fn (mut c Checker) type_node_expr(type_expr ast.Type) Type {
 	if type_expr is ast.MapType {
 		map_type := type_expr as ast.MapType
 		return Map{
-			key_type:   c.type_expr(map_type.key_type)
-			value_type: c.type_expr(map_type.value_type)
+			key_type:   c.direct_type_expr(map_type.key_type)
+			value_type: c.direct_type_expr(map_type.value_type)
 		}
 	}
 	if type_expr is ast.NilType {
@@ -2282,20 +2540,20 @@ fn (mut c Checker) type_node_expr(type_expr ast.Type) Type {
 	if type_expr is ast.OptionType {
 		opt_type := type_expr as ast.OptionType
 		return OptionType{
-			base_type: c.type_expr(opt_type.base_type)
+			base_type: c.direct_type_expr(opt_type.base_type)
 		}
 	}
 	if type_expr is ast.PointerType {
 		ptr_type := type_expr as ast.PointerType
 		return Pointer{
-			base_type: c.type_expr(ptr_type.base_type)
+			base_type: c.direct_type_expr(ptr_type.base_type)
 			lifetime:  ptr_type.lifetime
 		}
 	}
 	if type_expr is ast.ResultType {
 		res_type := type_expr as ast.ResultType
 		return ResultType{
-			base_type: c.type_expr(res_type.base_type)
+			base_type: c.direct_type_expr(res_type.base_type)
 		}
 	}
 	if type_expr is ast.ThreadType {
@@ -2311,7 +2569,35 @@ fn (mut c Checker) type_node_expr(type_expr ast.Type) Type {
 		tuple_type := type_expr as ast.TupleType
 		mut types := []Type{}
 		for tx in tuple_type.types {
-			types << c.type_expr(tx)
+			if tx is ast.Type {
+				tx_type_node := tx as ast.Type
+				if tx_type_node is ast.ArrayType {
+					arr_type := tx_type_node as ast.ArrayType
+					elem_type := c.direct_type_expr(arr_type.elem_type)
+					types << Type(Array{
+						elem_type: elem_type
+					})
+				} else if tx_type_node is ast.ArrayFixedType {
+					arr_fixed_type := tx_type_node as ast.ArrayFixedType
+					mut len := 0
+					if arr_fixed_type.len is ast.BasicLiteral {
+						if arr_fixed_type.len.kind == .number {
+							len = int(strconv.parse_int(arr_fixed_type.len.value, 0, 64) or { 0 })
+						}
+					}
+					elem_type := c.direct_type_expr(arr_fixed_type.elem_type)
+					types << Type(ArrayFixed{
+						len:       len
+						elem_type: elem_type
+					})
+				} else if tx_type_node is ast.FnType {
+					types << Type(c.fn_type(tx_type_node, FnTypeAttribute.empty))
+				} else {
+					types << c.type_node_expr(tx_type_node)
+				}
+			} else {
+				types << c.type_expr(tx)
+			}
 		}
 		return Tuple{
 			types: types
@@ -2362,7 +2648,22 @@ fn (mut c Checker) stmt(stmt ast.Stmt) {
 			for field in stmt.fields {
 				// c.log('GlobalDecl: ${field.name} - ${obj.typ.type_name()}')
 				field_type := if field.typ !is ast.EmptyExpr {
-					c.type_expr(field.typ)
+					if field.typ is ast.Type {
+						field_type_node := field.typ as ast.Type
+						if field_type_node is ast.FnType {
+							Type(c.fn_type(field_type_node, FnTypeAttribute.empty))
+						} else if field_type_node is ast.PointerType {
+							ptr_type := field_type_node as ast.PointerType
+							Type(Pointer{
+								base_type: c.type_expr(ptr_type.base_type)
+								lifetime:  ptr_type.lifetime
+							})
+						} else {
+							c.type_node_expr(field_type_node)
+						}
+					} else {
+						c.type_expr(field.typ)
+					}
 				} else {
 					c.expr(field.value)
 				}
@@ -2678,9 +2979,25 @@ fn (mut c Checker) interface_decl_fields(decl ast.InterfaceDecl) []Field {
 		if field.name == 'type_name' {
 			has_type_name = true
 		}
+		field_typ := if field.typ is ast.Type {
+			field_type_node := field.typ as ast.Type
+			if field_type_node is ast.FnType {
+				Type(c.fn_type(field_type_node, FnTypeAttribute.empty))
+			} else if field_type_node is ast.PointerType {
+				ptr_type := field_type_node as ast.PointerType
+				Type(Pointer{
+					base_type: c.type_expr(ptr_type.base_type)
+					lifetime:  ptr_type.lifetime
+				})
+			} else {
+				c.type_node_expr(field_type_node)
+			}
+		} else {
+			c.type_expr(field.typ)
+		}
 		fields << Field{
 			name:         field.name
-			typ:          c.type_expr(field.typ)
+			typ:          field_typ
 			default_expr: field.value
 		}
 	}
@@ -2768,7 +3085,22 @@ fn (mut c Checker) process_pending_struct_decls() {
 		}
 		mut fields := []Field{}
 		for field in pending.decl.fields {
-			field_typ := c.type_expr(field.typ)
+			field_typ := if field.typ is ast.Type {
+				field_type_node := field.typ as ast.Type
+				if field_type_node is ast.FnType {
+					Type(c.fn_type(field_type_node, FnTypeAttribute.empty))
+				} else if field_type_node is ast.PointerType {
+					ptr_type := field_type_node as ast.PointerType
+					Type(Pointer{
+						base_type: c.type_expr(ptr_type.base_type)
+						lifetime:  ptr_type.lifetime
+					})
+				} else {
+					c.type_node_expr(field_type_node)
+				}
+			} else {
+				c.type_expr(field.typ)
+			}
 			fields << Field{
 				name:         field.name
 				typ:          field_typ
@@ -2845,7 +3177,22 @@ fn (mut c Checker) process_pending_type_decls() {
 			if mut obj := scope.lookup(pending.decl.name) {
 				if mut obj is Type {
 					if mut obj is Alias {
-						obj.base_type = c.type_expr(pending.decl.base_type)
+						obj.base_type = if pending.decl.base_type is ast.Type {
+							base_type_node := pending.decl.base_type as ast.Type
+							if base_type_node is ast.FnType {
+								Type(c.fn_type(base_type_node, FnTypeAttribute.empty))
+							} else if base_type_node is ast.PointerType {
+								ptr_type := base_type_node as ast.PointerType
+								Type(Pointer{
+									base_type: c.type_expr(ptr_type.base_type)
+									lifetime:  ptr_type.lifetime
+								})
+							} else {
+								c.type_node_expr(base_type_node)
+							}
+						} else {
+							c.type_expr(pending.decl.base_type)
+						}
 					}
 				}
 			}
@@ -3152,6 +3499,10 @@ fn (mut c Checker) assign_stmt(stmt ast.AssignStmt, unwrap_optional bool) {
 		}
 		if expr_type is Tuple {
 			expr_type = expr_type.types[i]
+		} else if stmt.lhs.len > 1 && stmt.rhs.len == 1 {
+			if tuple_elem_type := c.call_return_tuple_elem_type(rx, i) {
+				expr_type = tuple_elem_type
+			}
 		}
 		// promote untyped literals
 		expr_type = expr_type.typed_default()
@@ -3233,6 +3584,29 @@ fn (mut c Checker) assign_stmt(stmt ast.AssignStmt, unwrap_optional bool) {
 			}
 		}
 	}
+}
+
+fn (mut c Checker) call_return_tuple_elem_type(expr ast.Expr, index int) ?Type {
+	if expr is ast.CallExpr {
+		lhs_expr := c.resolve_expr(expr.lhs)
+		if lhs_expr is ast.Ident {
+			if obj := c.scope.lookup_parent(lhs_expr.name, 0) {
+				obj_type := obj.typ()
+				if obj_type is FnType {
+					fn_type := obj_type as FnType
+					if return_type := fn_type.return_type {
+						if return_type is Tuple {
+							tuple_type := return_type as Tuple
+							if index < tuple_type.types.len {
+								return tuple_type.types[index]
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	return none
 }
 
 // TODO:
@@ -3390,7 +3764,20 @@ fn (mut c Checker) fn_decl(decl ast.FnDecl) {
 	}
 	// TODO:
 	if decl.is_method {
-		mut receiver_type := c.type_expr(decl.receiver.typ)
+		mut receiver_type := if decl.receiver.typ is ast.Type {
+			receiver_type_node := decl.receiver.typ as ast.Type
+			if receiver_type_node is ast.PointerType {
+				ptr_type := receiver_type_node as ast.PointerType
+				Type(Pointer{
+					base_type: c.type_expr(ptr_type.base_type)
+					lifetime:  ptr_type.lifetime
+				})
+			} else {
+				c.type_node_expr(receiver_type_node)
+			}
+		} else {
+			c.type_expr(decl.receiver.typ)
+		}
 		if decl.receiver.is_mut {
 			if mut receiver_type is Pointer {
 				c.error_with_pos('use `mut Type` not `mut &Type`. TODO: proper error message',
@@ -3435,7 +3822,20 @@ fn (mut c Checker) fn_decl(decl ast.FnDecl) {
 		// Keep alias receiver names (e.g. `Builder`) instead of unwrapping to base
 		// array/map types, otherwise transformer cannot retrieve method scopes.
 		// Strip module prefix since set_fn_scope already prepends the module.
-		mut receiver_type := c.type_expr(decl.receiver.typ)
+		mut receiver_type := if decl.receiver.typ is ast.Type {
+			receiver_type_node := decl.receiver.typ as ast.Type
+			if receiver_type_node is ast.PointerType {
+				ptr_type := receiver_type_node as ast.PointerType
+				Type(Pointer{
+					base_type: c.type_expr(ptr_type.base_type)
+					lifetime:  ptr_type.lifetime
+				})
+			} else {
+				c.type_node_expr(receiver_type_node)
+			}
+		} else {
+			c.type_expr(decl.receiver.typ)
+		}
 		mut recv_scope_type := receiver_type
 		if receiver_type is Pointer {
 			recv_scope_type = (receiver_type as Pointer).base_type
@@ -4224,6 +4624,12 @@ fn (mut c Checker) unwrap_lhs_expr(expr ast.Expr) ast.Expr {
 }
 
 fn (mut c Checker) add_inferred_generic_type(mut type_map map[string]Type, name string, typ Type) ! {
+	if name.len == 0 || unsafe { usize(name.str) < 4096 } {
+		return
+	}
+	if typ is NamedType && (typ as NamedType) == name {
+		return
+	}
 	// NOTE: lookup on a mut map parameter currently miscompiles in the cleanc
 	// self-host path, so keep this as a direct set for stability.
 	type_map[name] = typ
@@ -4759,7 +5165,58 @@ fn (mut c Checker) fn_type_with_insert_params(fn_type ast.FnType, attributes FnT
 		// 		c.expr(param.typ)
 		// 	}
 		// } else { c.expr(param.typ) }
-		mut param_type := c.type_expr(param.typ)
+		mut param_type := if param.typ is ast.Type {
+			param_type_node := param.typ as ast.Type
+			if param_type_node is ast.FnType {
+				Type(c.fn_type(param_type_node, FnTypeAttribute.empty))
+			} else if param_type_node is ast.OptionType {
+				opt_type := param_type_node as ast.OptionType
+				base_type := if opt_type.base_type is ast.Type {
+					base_type_node := opt_type.base_type as ast.Type
+					if base_type_node is ast.ArrayType {
+						arr_type := base_type_node as ast.ArrayType
+						Type(Array{
+							elem_type: c.direct_type_expr(arr_type.elem_type)
+						})
+					} else {
+						c.type_node_expr(base_type_node)
+					}
+				} else {
+					c.type_expr(opt_type.base_type)
+				}
+				Type(OptionType{
+					base_type: base_type
+				})
+			} else if param_type_node is ast.PointerType {
+				ptr_type := param_type_node as ast.PointerType
+				Type(Pointer{
+					base_type: c.direct_type_expr(ptr_type.base_type)
+					lifetime:  ptr_type.lifetime
+				})
+			} else if param_type_node is ast.ResultType {
+				res_type := param_type_node as ast.ResultType
+				base_type := if res_type.base_type is ast.Type {
+					base_type_node := res_type.base_type as ast.Type
+					if base_type_node is ast.ArrayType {
+						arr_type := base_type_node as ast.ArrayType
+						Type(Array{
+							elem_type: c.direct_type_expr(arr_type.elem_type)
+						})
+					} else {
+						c.type_node_expr(base_type_node)
+					}
+				} else {
+					c.type_expr(res_type.base_type)
+				}
+				Type(ResultType{
+					base_type: base_type
+				})
+			} else {
+				c.type_node_expr(param_type_node)
+			}
+		} else {
+			c.type_expr(param.typ)
+		}
 		if param.typ is ast.PrefixExpr {
 			if param.typ.op == .ellipsis {
 				if i < fn_type.params.len - 1 {
@@ -4796,7 +5253,58 @@ fn (mut c Checker) fn_type_with_insert_params(fn_type ast.FnType, attributes FnT
 	// 	}
 	// } else { c.expr(fn_type.return_type) }
 
-	ret_type_expr := c.type_expr(fn_type.return_type)
+	ret_type_expr := if fn_type.return_type is ast.Type {
+		ret_type_node := fn_type.return_type as ast.Type
+		if ret_type_node is ast.FnType {
+			Type(c.fn_type(ret_type_node, FnTypeAttribute.empty))
+		} else if ret_type_node is ast.OptionType {
+			opt_type := ret_type_node as ast.OptionType
+			base_type := if opt_type.base_type is ast.Type {
+				base_type_node := opt_type.base_type as ast.Type
+				if base_type_node is ast.ArrayType {
+					arr_type := base_type_node as ast.ArrayType
+					Type(Array{
+						elem_type: c.direct_type_expr(arr_type.elem_type)
+					})
+				} else {
+					c.type_node_expr(base_type_node)
+				}
+			} else {
+				c.type_expr(opt_type.base_type)
+			}
+			Type(OptionType{
+				base_type: base_type
+			})
+		} else if ret_type_node is ast.PointerType {
+			ptr_type := ret_type_node as ast.PointerType
+			Type(Pointer{
+				base_type: c.direct_type_expr(ptr_type.base_type)
+				lifetime:  ptr_type.lifetime
+			})
+		} else if ret_type_node is ast.ResultType {
+			res_type := ret_type_node as ast.ResultType
+			base_type := if res_type.base_type is ast.Type {
+				base_type_node := res_type.base_type as ast.Type
+				if base_type_node is ast.ArrayType {
+					arr_type := base_type_node as ast.ArrayType
+					Type(Array{
+						elem_type: c.direct_type_expr(arr_type.elem_type)
+					})
+				} else {
+					c.type_node_expr(base_type_node)
+				}
+			} else {
+				c.type_expr(res_type.base_type)
+			}
+			Type(ResultType{
+				base_type: base_type
+			})
+		} else {
+			c.type_node_expr(ret_type_node)
+		}
+	} else {
+		c.type_expr(fn_type.return_type)
+	}
 	mut typ := FnType{
 		generic_params: generic_params
 		params:         params
@@ -5118,6 +5626,14 @@ fn (mut c Checker) struct_implements_name(st Struct, target string) bool {
 fn (mut c Checker) find_field_or_method(t Type, raw_name string) !Type {
 	// Strip @ prefix used to escape V keywords in field/method names (e.g., @type → type)
 	name := if raw_name.len > 0 && raw_name[0] == `@` { raw_name[1..] } else { raw_name }
+	lookup_key := field_or_method_lookup_key(t, name)
+	if lookup_key in c.field_method_lookup_stack {
+		return error('recursive field or method lookup for `${name}`')
+	}
+	c.field_method_lookup_stack << lookup_key
+	defer {
+		c.field_method_lookup_stack.delete(c.field_method_lookup_stack.len - 1)
+	}
 	// TODO: is this the best way to do this?
 	// this whole field/method search needs to be cleaned up
 	// fields and method with same name should not be allowed to begin with!
@@ -5328,19 +5844,16 @@ fn (mut c Checker) find_field_or_method(t Type, raw_name string) !Type {
 					elem_type: map_type.value_type
 				}))
 			}
+			if name == 'keys' {
+				return fn_with_return_type(empty_fn_type(), Type(Array{
+					elem_type: map_type.key_type
+				}))
+			}
 			mut builtin_scope := c.get_module_scope('builtin', universe)
 			at := builtin_scope.lookup_parent('map', 0) or { panic('missing builtin map type') }
 			at_type := at.typ()
 			// c.log('MAP: looking for field or method ${name} on ${t.name()}')
 			if field_or_method_type := c.find_field_or_method(at_type, name) {
-				if name == 'keys' {
-					if field_or_method_type is FnType {
-						fn_type := field_or_method_type as FnType
-						return fn_with_return_type(fn_type, Type(Array{
-							elem_type: map_type.key_type
-						}))
-					}
-				}
 				return field_or_method_type
 			}
 		}
@@ -5586,9 +6099,41 @@ fn (mut c Checker) find_field_or_method(t Type, raw_name string) !Type {
 	return error('cannot find field or method: `${name}` for type ${t.name()} - (base: ${base_type.name()})')
 }
 
+fn field_or_method_lookup_key(t Type, name string) string {
+	tag := unsafe { *(&u64(&t)) }
+	data := unsafe { *(&u64(&u8(&t) + 8)) }
+	mut type_name_part := ''
+	match t {
+		Alias {
+			type_name_part = t.name
+		}
+		Enum {
+			type_name_part = t.name
+		}
+		Interface {
+			type_name_part = t.name
+		}
+		NamedType {
+			type_name_part = string(t)
+		}
+		Struct {
+			type_name_part = t.name
+		}
+		SumType {
+			type_name_part = t.name
+		}
+		else {}
+	}
+
+	return '${name}|${tag}|${data}|${type_name_part}'
+}
+
 fn (c &Checker) resolve_active_generic_named_type(t NamedType) ?Type {
 	for generic_types in c.env.cur_generic_types {
 		if concrete := generic_types[string(t)] {
+			if concrete is NamedType && (concrete as NamedType) == t {
+				continue
+			}
 			return concrete
 		}
 	}

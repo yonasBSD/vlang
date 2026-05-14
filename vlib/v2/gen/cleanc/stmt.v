@@ -274,6 +274,13 @@ fn (mut g Gen) gen_stmt(node ast.Stmt) {
 					g.sb.writeln(' };')
 					return
 				}
+				ierror_base := g.ierror_concrete_base_for_expr(expr)
+				if ierror_base != '' {
+					g.sb.write_string('return (${g.cur_fn_ret_type}){ .is_error=true, .err=')
+					g.gen_ierror_boxed_expr(expr, ierror_base)
+					g.sb.writeln(' };')
+					return
+				}
 				value_type := g.result_value_type(g.cur_fn_ret_type)
 				if value_type in g.tuple_aliases && node.exprs.len > 1 {
 					field_types := g.tuple_aliases[value_type]

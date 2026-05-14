@@ -57,6 +57,36 @@ fn find_stop() int {
 	assert csrc.contains('stop_index')
 }
 
+fn test_generate_c_passes_mut_arg_by_address_to_fn_pointer_param() {
+	csrc := generate_result_option_c_for_test('
+fn render(replacement fn (string, mut []string)) int {
+	mut out := []string{}
+	replacement("x", mut out)
+	return 0
+}
+')
+	assert csrc.contains('replacement((string){.str = "x"')
+	assert csrc.contains(', &out);')
+	assert !csrc.contains(', out);')
+}
+
+fn test_generate_c_resolves_fn_literal_param_type_for_string_interpolation() {
+	csrc := generate_result_option_c_for_test('
+fn render(replacement fn (string, mut []string)) {
+	mut out := []string{}
+	replacement("x", mut out)
+}
+
+fn demo() {
+	render(fn (name string, mut out []string) {
+		out << "<\${name}>"
+	})
+}
+')
+	assert csrc.contains('"<%s>"')
+	assert !csrc.contains('"<%d>"')
+}
+
 fn test_generate_c_expands_builtin_option_clone_if_guard() {
 	csrc := generate_result_option_c_for_test('
 interface IClone {}
@@ -112,4 +142,192 @@ fn (h &Holder) value_ref() ?&string {
 	assert !csrc.contains('_or_t')
 	assert csrc.contains('(h)->value.state != 0')
 	assert csrc.contains('&(*(string*)(((u8*)(&(h)->value.err)) + sizeof(IError)))')
+}
+
+fn test_generate_c_returns_custom_error_from_result_function_as_error() {
+	csrc := generate_result_option_c_for_test('
+struct SizeError {}
+
+fn (err SizeError) msg() string {
+	return "bad size"
+}
+
+fn (err SizeError) code() int {
+	return 7
+}
+
+fn make_error() SizeError {
+	return SizeError{}
+}
+
+fn parse() !u64 {
+	return make_error()
+}
+')
+	assert csrc.contains('return (_result_u64){ .is_error=true, .err=')
+	assert csrc.contains('IError_SizeError_msg_wrapper')
+	assert csrc.contains('SizeError* _ierr_obj')
+	assert !csrc.contains('u64 _val = main__make_error()')
+}
+
+fn test_generate_c_keeps_option_if_guard_err_as_concrete_error_ref() {
+	csrc := generate_result_option_c_for_test('
+struct MyError {}
+
+fn (err MyError) msg() string {
+	return "bad"
+}
+
+fn maybe_error() ?&MyError {
+	return &MyError{}
+}
+
+fn read() string {
+	if err := maybe_error() {
+		return err.msg()
+	}
+	return ""
+}
+')
+	assert csrc.contains('MyError__msg((*err))')
+	assert !csrc.contains('err->_object')
+	assert !csrc.contains('MyError__msg((*err),')
+}
+
+fn test_generate_c_casts_concrete_arg_for_mut_interface_param() {
+	csrc := generate_result_option_c_for_test('
+interface Reader {
+mut:
+	read(mut []u8) !int
+}
+
+struct ByteReader {}
+
+fn (mut rdr ByteReader) read(mut buf []u8) !int {
+	return 0
+}
+
+fn consume(mut rdr Reader) !int {
+	mut buf := []u8{len: 4}
+	return rdr.read(mut buf)
+}
+
+fn demo() !int {
+	mut rdr := ByteReader{}
+	return consume(mut rdr)
+}
+')
+	assert csrc.contains('Reader* _iface_t')
+	assert csrc.contains('ByteReader__read')
+	assert !csrc.contains('consume(&rdr)')
+}
+
+fn test_generate_c_preserves_c_pointer_cast_selector_field_access() {
+	csrc := generate_result_option_c_for_test('
+@[typedef]
+struct C.log__Logger {
+mut:
+	_object voidptr
+}
+
+interface Logger {
+mut:
+	free()
+}
+
+fn raw_object(logger &Logger) voidptr {
+	unsafe {
+		pobject := &C.log__Logger(logger)._object
+		return pobject
+	}
+}
+')
+	assert csrc.contains('pobject = ((log__Logger*)(logger))->_object;')
+	assert !csrc.contains('voidptr* pobject')
+	assert !csrc.contains('&logger->_object')
+}
+
+fn test_generate_c_preserves_embedded_error_concrete_type_name() {
+	csrc := generate_result_option_c_for_test('
+struct Error {}
+
+fn (err Error) msg() string {
+	return ""
+}
+
+fn (err Error) code() int {
+	return 0
+}
+
+struct Eof {
+	Error
+}
+
+fn read() !int {
+	return Eof{}
+}
+
+fn demo() bool {
+	_ := read() or {
+		return err is Eof
+	}
+	return false
+}
+')
+	assert csrc.contains('IError_Eof_type_name_wrapper')
+	assert csrc.contains('IError_Eof_msg_wrapper')
+	assert !csrc.contains('.type_name = IError_Error_type_name_wrapper')
+}
+
+fn test_generate_c_does_not_emit_nested_generic_structs_with_placeholder_args() {
+	csrc := generate_result_option_c_for_test('
+struct NoColor[W] {
+mut:
+	wtr W
+}
+
+struct CounterWriter[W] {
+mut:
+	wtr W
+}
+
+struct Summary[W] {
+mut:
+	wtr CounterWriter[W]
+}
+
+fn build_no_color[W](wtr W) Summary[NoColor[W]] {
+	_ = wtr
+	return Summary[NoColor[W]]{}
+}
+')
+	assert !csrc.contains('struct CounterWriter {\n\tNoColor wtr;')
+	assert !csrc.contains('struct Summary {\n\tCounterWriter wtr;')
+}
+
+fn test_generate_c_skips_interface_clone_for_incomplete_generic_implementor() {
+	csrc := generate_result_option_c_for_test('
+interface Writer {
+mut:
+	write() !int
+}
+
+struct Wrapper[W] {
+mut:
+	wtr W
+}
+
+fn (mut w Wrapper[W]) write() !int {
+	_ = w
+	return 0
+}
+
+fn wrap[W](wtr W) Wrapper[W] {
+	return Wrapper[W]{
+		wtr: wtr
+	}
+}
+')
+	assert !csrc.contains('sizeof(Wrapper)')
+	assert !csrc.contains('Wrapper__write(Wrapper* w) {')
 }

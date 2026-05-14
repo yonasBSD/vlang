@@ -4,6 +4,18 @@ module cleanc
 import v2.ast
 import v2.types
 
+fn test_should_emit_matcher_byte_set_contains_dependency() {
+	mut env := types.Environment.new()
+	mut gen := Gen.new_with_env([], env)
+	gen.set_used_fn_keys({
+		'main|f|main': true
+	})
+	assert gen.should_emit_fn_decl('matcher', ast.FnDecl{
+		name: 'byte_set_contains'
+		typ:  ast.FnType{}
+	})
+}
+
 fn test_c_string_literal_content_to_c_single_line() {
 	out := c_string_literal_content_to_c('hello')
 	assert out == '"hello"'

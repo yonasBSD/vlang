@@ -1,7 +1,10 @@
 // vtest build: !linux
 module markused
 
+import os
 import v2.ast
+import v2.parser
+import v2.pref as vpref
 import v2.token
 import v2.types
 
@@ -10,6 +13,54 @@ fn pos(id int) token.Pos {
 		offset: id
 		id:     id
 	}
+}
+
+fn mark_used_for_code(code string) map[string]bool {
+	tmp_file := os.join_path(os.temp_dir(), 'v2_markused_test_${os.getpid()}.v')
+	os.write_file(tmp_file, code) or { panic('failed to write temp file') }
+	defer {
+		os.rm(tmp_file) or {}
+	}
+	prefs := &vpref.Preferences{}
+	mut file_set := token.FileSet.new()
+	mut par := parser.Parser.new(prefs)
+	files := par.parse_files([tmp_file], mut file_set)
+	env := types.Environment.new()
+	mut checker := types.Checker.new(prefs, file_set, env)
+	checker.check_files(files)
+	return mark_used(files, env)
+}
+
+fn mark_used_for_code_files(code_files map[string]string) map[string]bool {
+	tmp_dir := os.join_path(os.temp_dir(), 'v2_markused_test_${os.getpid()}')
+	os.mkdir_all(tmp_dir) or { panic('failed to create temp dir') }
+	defer {
+		os.rmdir_all(tmp_dir) or {}
+	}
+	mut paths := []string{}
+	for name, code in code_files {
+		path := os.join_path(tmp_dir, name)
+		os.mkdir_all(os.dir(path)) or { panic('failed to create temp file dir') }
+		os.write_file(path, code) or { panic('failed to write temp file') }
+		paths << path
+	}
+	prefs := &vpref.Preferences{}
+	mut file_set := token.FileSet.new()
+	mut par := parser.Parser.new(prefs)
+	files := par.parse_files(paths, mut file_set)
+	env := types.Environment.new()
+	mut checker := types.Checker.new(prefs, file_set, env)
+	checker.check_files(files)
+	return mark_used(files, env)
+}
+
+fn has_used_key_containing(used map[string]bool, needle string) bool {
+	for key, value in used {
+		if value && key.contains(needle) {
+			return true
+		}
+	}
+	return false
 }
 
 fn test_mark_used_tracks_transitive_function_calls() {
@@ -73,6 +124,181 @@ fn test_mark_used_tracks_transitive_function_calls() {
 	assert used[foo_key]
 	assert used[bar_key]
 	assert !used[dead_key]
+}
+
+fn test_mark_used_tracks_imported_module_function_calls() {
+	mut env := types.Environment.new()
+	files := [
+		ast.File{
+			mod:     'searcher'
+			name:    'searcher.v'
+			imports: [
+				ast.ImportStmt{
+					name: 'matcher'
+				},
+			]
+			stmts:   [
+				ast.Stmt(ast.FnDecl{
+					name:  'test_use'
+					typ:   ast.FnType{}
+					pos:   pos(20)
+					stmts: [
+						ast.Stmt(ast.ExprStmt{
+							expr: ast.CallExpr{
+								lhs: ast.SelectorExpr{
+									lhs: ast.Ident{
+										name: 'matcher'
+										pos:  pos(21)
+									}
+									rhs: ast.Ident{
+										name: 'byte_set_contains'
+										pos:  pos(22)
+									}
+									pos: pos(22)
+								}
+								pos: pos(22)
+							}
+						}),
+					]
+				}),
+			]
+		},
+		ast.File{
+			mod:   'matcher'
+			name:  'matcher.v'
+			stmts: [
+				ast.Stmt(ast.FnDecl{
+					name: 'byte_set_contains'
+					typ:  ast.FnType{}
+					pos:  pos(23)
+				}),
+			]
+		},
+	]
+	used := mark_used(files, env)
+	test_key := decl_key('searcher', files[0].stmts[0] as ast.FnDecl, env)
+	contains_key := decl_key('matcher', files[1].stmts[0] as ast.FnDecl, env)
+	assert used[test_key]
+	assert used[contains_key]
+}
+
+fn test_mark_used_tracks_imported_static_method_calls() {
+	used := mark_used_for_code_files({
+		'searcher.v': '
+module searcher
+
+import matcher
+
+fn test_static_call() {
+	_ = matcher.NoCaptures.new()
+}
+'
+		'matcher.v':  '
+module matcher
+
+pub struct NoCaptures {}
+
+pub fn NoCaptures.new() NoCaptures {
+	return NoCaptures{}
+}
+'
+	})
+	assert has_used_key_containing(used, 'searcher|f|test_static_call')
+	assert has_used_key_containing(used, 'matcher|m|NoCaptures|new')
+}
+
+fn test_mark_used_tracks_implicit_interface_call_arg_methods() {
+	used := mark_used_for_code('
+module main
+
+interface Sink {
+	foo() int
+	bar() int
+}
+
+struct Impl {}
+struct Runner {}
+
+fn (i Impl) foo() int {
+	_ = i
+	return 1
+}
+
+fn (i Impl) bar() int {
+	_ = i
+	return 2
+}
+
+fn Impl.new() Impl {
+	return Impl{}
+}
+
+fn takes(s Sink) {
+	_ = s
+}
+
+fn (r Runner) takes(s Sink) {
+	_ = r
+	_ = s
+}
+
+fn test_interface_arg() {
+	takes(Impl{})
+	takes(Impl.new())
+	r := Runner{}
+	r.takes(Impl{})
+	r.takes(Impl.new())
+}
+')
+	assert has_used_key_containing(used, '|m|Impl|foo')
+	assert has_used_key_containing(used, '|m|Impl|bar')
+}
+
+fn test_mark_used_tracks_interface_arg_to_pointer_receiver_method() {
+	used := mark_used_for_code_files({
+		'searcher.v': '
+module searcher
+
+import matcher
+
+struct Searcher {}
+struct LiteralMatcher {}
+
+fn LiteralMatcher.new() LiteralMatcher {
+	return LiteralMatcher{}
+}
+
+fn (m LiteralMatcher) new_captures() !matcher.NoCaptures {
+	_ = m
+	return matcher.NoCaptures.new()
+}
+
+fn (s &Searcher) search_slice(matcher_ matcher.Matcher) ! {
+	_ = s
+	_ = matcher_
+}
+
+fn test_search_slice() {
+	searcher_ := Searcher{}
+	searcher_.search_slice(LiteralMatcher.new()) or {}
+}
+'
+		'matcher.v':  '
+module matcher
+
+pub struct NoCaptures {}
+
+pub interface Matcher {
+	new_captures() !NoCaptures
+}
+
+pub fn NoCaptures.new() NoCaptures {
+	return NoCaptures{}
+}
+'
+	})
+	assert has_used_key_containing(used, 'searcher|m|LiteralMatcher|new_captures')
+	assert has_used_key_containing(used, 'matcher|m|NoCaptures|new')
 }
 
 fn test_mark_used_tracks_method_calls_with_env_types() {

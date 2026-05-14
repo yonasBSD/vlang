@@ -772,6 +772,53 @@ fn (mut g Gen) gen_deref_cast_selector(lhs_expr ast.Expr, owner string, field_na
 	return false
 }
 
+fn (mut g Gen) c_cast_selector_parts(sel ast.SelectorExpr) ?(string, ast.Expr) {
+	lhs := g.unwrap_parens(sel.lhs)
+	if lhs is ast.CallExpr && lhs.args.len == 1 && lhs.lhs is ast.SelectorExpr {
+		call_lhs := lhs.lhs as ast.SelectorExpr
+		if call_lhs.lhs is ast.Ident && call_lhs.lhs.name == 'C' {
+			mut target_type := g.expr_type_to_c(lhs.lhs)
+			if target_type == '' || target_type == 'int' {
+				target_type = call_lhs.rhs.name
+			}
+			return target_type, lhs.args[0]
+		}
+	}
+	if lhs is ast.CallOrCastExpr && lhs.lhs is ast.SelectorExpr {
+		call_lhs := lhs.lhs as ast.SelectorExpr
+		if call_lhs.lhs is ast.Ident && call_lhs.lhs.name == 'C' {
+			mut target_type := g.expr_type_to_c(lhs.lhs)
+			if target_type == '' || target_type == 'int' {
+				target_type = call_lhs.rhs.name
+			}
+			return target_type, lhs.expr
+		}
+	}
+	if lhs is ast.CastExpr && lhs.typ is ast.SelectorExpr {
+		cast_lhs := lhs.typ as ast.SelectorExpr
+		if cast_lhs.lhs is ast.Ident && cast_lhs.lhs.name == 'C' {
+			mut target_type := g.expr_type_to_c(lhs.typ)
+			if target_type == '' || target_type == 'int' {
+				target_type = cast_lhs.rhs.name
+			}
+			return target_type, lhs.expr
+		}
+	}
+	return none
+}
+
+fn (mut g Gen) gen_addr_of_c_cast_selector(sel ast.SelectorExpr) bool {
+	target_type, arg := g.c_cast_selector_parts(sel) or { return false }
+	if target_type.ends_with('*') {
+		g.sb.write_string('((${target_type})(')
+	} else {
+		g.sb.write_string('((${target_type}*)(')
+	}
+	g.expr(arg)
+	g.sb.write_string('))->${escape_c_keyword(sel.rhs.name)}')
+	return true
+}
+
 fn (mut g Gen) gen_channel_receive_expr(node ast.PrefixExpr) bool {
 	if node.op != .arrow {
 		return false
@@ -1775,6 +1822,9 @@ fn (mut g Gen) expr(node ast.Expr) {
 				}
 				if node.expr is ast.SelectorExpr {
 					sel := node.expr as ast.SelectorExpr
+					if g.gen_addr_of_c_cast_selector(sel) {
+						return
+					}
 					field_idx := vector_field_index(sel.rhs.name)
 					if field_idx >= 0 {
 						mut lhs_type := g.get_expr_type(sel.lhs)

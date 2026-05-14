@@ -494,6 +494,18 @@ fn (mut g Gen) gen_assign_stmt(node ast.AssignStmt) {
 				typ = target_type + '*'
 			}
 		}
+		mut type_from_c_cast_selector := false
+		// Legacy C pointer-cast selector syntax:
+		// `&C.Type(ptr).field` means `((Type*)ptr)->field`, not `&(((Type*)ptr)->field)`.
+		if rhs is ast.PrefixExpr && rhs.op == .amp && rhs.expr is ast.SelectorExpr {
+			if _, _ := g.c_cast_selector_parts(rhs.expr) {
+				field_type := g.selector_field_type(rhs.expr)
+				if field_type != '' && field_type != 'int' {
+					typ = field_type
+					type_from_c_cast_selector = true
+				}
+			}
+		}
 		mut type_from_typed_deref := false
 		if rhs is ast.PrefixExpr && rhs.op == .mul && rhs.expr is ast.CastExpr {
 			target_type := g.expr_type_to_c(rhs.expr.typ)
@@ -588,8 +600,8 @@ fn (mut g Gen) gen_assign_stmt(node ast.AssignStmt) {
 			}
 		}
 		if !elem_type_from_array && !type_from_selector_field && !type_from_tuple_field
-			&& !rhs_is_concrete_literal && !type_from_typed_deref && name != ''
-			&& g.cur_fn_scope != unsafe { nil } {
+			&& !rhs_is_concrete_literal && !type_from_typed_deref && !type_from_c_cast_selector
+			&& name != '' && g.cur_fn_scope != unsafe { nil } {
 			if obj := g.cur_fn_scope.lookup_parent(name, 0) {
 				if obj !is types.Module {
 					obj_type := obj.typ()
@@ -704,8 +716,9 @@ fn (mut g Gen) gen_assign_stmt(node ast.AssignStmt) {
 				return
 			}
 		}
-		if !elem_type_from_array && (typ == '' || typ == 'int'
-			|| typ == 'int_literal' || typ == 'void*' || typ == 'voidptr') && rhs_type != ''
+		if !elem_type_from_array && !type_from_c_cast_selector && (typ == ''
+			|| typ == 'int' || typ == 'int_literal' || typ == 'void*'
+			|| typ == 'voidptr') && rhs_type != ''
 			&& rhs_type !in ['int', 'int_literal', 'float_literal']
 			&& !rhs_type.starts_with('_result_') && !rhs_type.starts_with('_option_') {
 			typ = rhs_type

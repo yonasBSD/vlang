@@ -306,6 +306,74 @@ fn test_transform_comptime_embed_file_chained_method_call() {
 	assert (init.fields[3].value as ast.StringLiteral).value == quote_v_string_literal(asset_path)
 }
 
+fn test_transform_comptime_embed_file_nested_chained_method_call() {
+	raw_dir := os.join_path(os.temp_dir(), 'v2_transformer_embed_file_nested_chain_${os.getpid()}')
+	os.mkdir_all(raw_dir) or { panic(err) }
+	tmp_dir := os.real_path(raw_dir)
+	defer {
+		os.rmdir_all(tmp_dir) or {}
+	}
+	source_path := os.join_path(tmp_dir, 'main.v')
+	asset_path := os.join_path(tmp_dir, 'asset.txt')
+	os.write_file(source_path, 'fn main() {}') or { panic(err) }
+	os.write_file(asset_path, 'hello') or { panic(err) }
+
+	mut t := create_test_transformer()
+	t.cur_file_name = source_path
+
+	result := t.transform_comptime_expr(ast.ComptimeExpr{
+		expr: ast.Expr(ast.CallOrCastExpr{
+			lhs:  ast.Expr(ast.SelectorExpr{
+				lhs: ast.Expr(ast.CallExpr{
+					lhs:  ast.Expr(ast.SelectorExpr{
+						lhs: ast.Expr(ast.CallOrCastExpr{
+							lhs:  ast.Expr(ast.Ident{
+								name: 'embed_file'
+							})
+							expr: ast.Expr(ast.StringLiteral{
+								kind:  .v
+								value: "'asset.txt'"
+							})
+						})
+						rhs: ast.Ident{
+							name: 'to_string'
+						}
+					})
+					args: []
+				})
+				rhs: ast.Ident{
+					name: 'trim_left'
+				}
+			})
+			expr: ast.Expr(ast.StringLiteral{
+				kind:  .v
+				value: "'\\n'"
+			})
+		})
+	})
+
+	assert t.needed_embed_file_helper
+	assert result is ast.CallOrCastExpr, 'expected CallOrCastExpr, got ${result.type_name()}'
+	outer := result as ast.CallOrCastExpr
+	assert outer.lhs is ast.SelectorExpr
+	outer_sel := outer.lhs as ast.SelectorExpr
+	assert outer_sel.rhs.name == 'trim_left'
+	assert outer_sel.lhs is ast.CallExpr
+	inner_call := outer_sel.lhs as ast.CallExpr
+	assert inner_call.lhs is ast.SelectorExpr
+	inner_sel := inner_call.lhs as ast.SelectorExpr
+	assert inner_sel.rhs.name == 'to_string'
+	assert inner_sel.lhs is ast.InitExpr
+	init := inner_sel.lhs as ast.InitExpr
+	assert init.typ is ast.Ident
+	assert (init.typ as ast.Ident).name == embed_file_helper_type_name
+	assert init.fields.len == 4
+	assert init.fields[0].value is ast.StringLiteral
+	assert (init.fields[0].value as ast.StringLiteral).value == "'hello'"
+	assert init.fields[3].value is ast.StringLiteral
+	assert (init.fields[3].value as ast.StringLiteral).value == quote_v_string_literal(asset_path)
+}
+
 fn test_inject_embed_file_helper_adds_builtin_helper_once() {
 	mut t := create_test_transformer()
 	mut files := [
