@@ -158,7 +158,7 @@ fn (mut g Gen) should_emit_fn_decl(module_name string, decl ast.FnDecl) bool {
 		return true
 	}
 	if module_name == 'searcher'
-		&& decl.name in ['multi_line_with_matcher', 'line_terminator', 'buffer', 'bytes_range_in_buffer', 'bytes', 'binary_byte_offset', 'byte_count', 'binary_detection', 'quit_byte', 'count', 'lines', 'new', 'pos'] {
+		&& decl.name in ['multi_line_with_matcher', 'multi_line', 'line_terminator', 'buffer', 'bytes_range_in_buffer', 'bytes', 'binary_byte_offset', 'byte_count', 'binary_detection', 'quit_byte', 'count', 'lines', 'new', 'pos'] {
 		return true
 	}
 	if module_name == 'log'

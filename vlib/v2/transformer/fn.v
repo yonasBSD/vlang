@@ -283,7 +283,11 @@ fn (t &Transformer) get_method_fn_type(expr ast.Expr) ?types.FnType {
 	method_name := sel_expr.rhs.name
 	mut lookup_type_names := []string{}
 	// Get the receiver type from the checker's stored types.
-	if receiver_type := t.resolve_expr_type(sel_expr.lhs) {
+	if receiver_type := t.method_receiver_override_type(sel_expr.lhs) {
+		t.append_method_lookup_type_name(mut lookup_type_names, receiver_type.name())
+		base_type := t.unwrap_alias_and_pointer_type(receiver_type)
+		t.append_method_lookup_type_name(mut lookup_type_names, base_type.name())
+	} else if receiver_type := t.resolve_expr_type(sel_expr.lhs) {
 		t.append_method_lookup_type_name(mut lookup_type_names, receiver_type.name())
 		base_type := t.unwrap_alias_and_pointer_type(receiver_type)
 		t.append_method_lookup_type_name(mut lookup_type_names, base_type.name())
@@ -298,6 +302,19 @@ fn (t &Transformer) get_method_fn_type(expr ast.Expr) ?types.FnType {
 		t.append_method_lookup_type_name(mut lookup_type_names, var_type_name)
 	}
 	return t.lookup_method_fn_type(lookup_type_names, method_name)
+}
+
+fn (t &Transformer) method_receiver_override_type(receiver ast.Expr) ?types.Type {
+	if receiver is ast.Ident {
+		if typ := t.decl_type_overrides[receiver.name] {
+			return typ
+		}
+	} else if receiver is ast.ModifierExpr {
+		return t.method_receiver_override_type(receiver.expr)
+	} else if receiver is ast.ParenExpr {
+		return t.method_receiver_override_type(receiver.expr)
+	}
+	return none
 }
 
 fn (t &Transformer) expr_can_be_call_target(expr ast.Expr) bool {
@@ -1650,10 +1667,18 @@ fn (mut t Transformer) transform_call_expr(expr ast.CallExpr) ast.Expr {
 		// Transform direct .str() calls on arrays/maps to specialized function calls
 		// e.g., a.str() where a is []int -> Array_int_str(a)
 		if method_name == 'str' && expr.args.len == 0 {
+			mut has_explicit_str_method := false
+			if resolved := t.resolve_method_call_name(sel.lhs, 'str') {
+				if !resolved.starts_with('Array_') && !resolved.starts_with('array__')
+					&& !resolved.starts_with('Map_') && !resolved.starts_with('map__') {
+					has_explicit_str_method = true
+				}
+			}
 			// Keep explicit user-defined/declared str() methods (e.g. strings.Builder).
 			// Only lower to helper calls when there is no real method on the receiver type.
 			str_fn_info := t.get_str_fn_info_for_expr(sel.lhs)
-			if str_fn_info.str_fn_name != '' && str_fn_info.str_fn_name != 'Array_u8_str' {
+			if !has_explicit_str_method && str_fn_info.str_fn_name != ''
+				&& str_fn_info.str_fn_name != 'Array_u8_str' {
 				is_array_or_map_str := str_fn_info.str_fn_name.starts_with('Array_')
 					|| str_fn_info.str_fn_name.starts_with('Array_fixed_')
 					|| str_fn_info.str_fn_name.starts_with('Map_')
@@ -2456,7 +2481,10 @@ fn (t &Transformer) is_static_method_call(receiver ast.Expr) bool {
 // none when the receiver type is unknown or the method is not registered
 // (e.g. function pointer field calls), which prevents false lowering.
 fn (t &Transformer) resolve_method_call_name(receiver ast.Expr, method_name string) ?string {
-	mut recv_type_opt := t.get_expr_type(receiver)
+	mut recv_type_opt := t.method_receiver_override_type(receiver)
+	if recv_type_opt == none {
+		recv_type_opt = t.get_expr_type(receiver)
+	}
 	if recv_type_opt == none && receiver is ast.SelectorExpr {
 		recv_type_opt = t.get_struct_field_type(receiver)
 	}

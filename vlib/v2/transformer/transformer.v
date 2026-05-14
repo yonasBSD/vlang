@@ -3822,6 +3822,27 @@ fn (t &Transformer) infer_decl_type_from_type_expr(expr ast.Expr) ?types.Type {
 				base_type: base_type
 			})
 		}
+		if type_expr is ast.FnType {
+			mut param_types := []types.Type{cap: type_expr.params.len}
+			mut param_names := []string{cap: type_expr.params.len}
+			mut param_is_mut := []bool{cap: type_expr.params.len}
+			for param in type_expr.params {
+				param_type := t.infer_decl_type_from_type_expr(param.typ) or { return none }
+				param_types << param_type
+				param_names << param.name
+				param_is_mut << (param.is_mut || param.typ is ast.ModifierExpr)
+			}
+			mut has_return_type := false
+			mut return_type := types.Type(types.void_)
+			if type_expr.return_type !is ast.EmptyExpr {
+				return_type = t.infer_decl_type_from_type_expr(type_expr.return_type) or {
+					return none
+				}
+				has_return_type = true
+			}
+			return types.Type(types.new_fn_type(param_types, param_names, param_is_mut,
+				return_type, has_return_type))
+		}
 	}
 	mut type_name := t.type_expr_name_full(expr)
 	mut is_ptr := false

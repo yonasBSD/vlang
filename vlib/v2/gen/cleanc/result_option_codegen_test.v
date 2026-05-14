@@ -62,7 +62,6 @@ fn with_name_to_index(name_to_index fn (string) ?int) {
 	}
 }
 ")
-	println(csrc)
 	assert csrc.contains('_option_int _or_t')
 	assert csrc.contains('if ((_or_t')
 	assert !csrc.contains('void* _or_t')
