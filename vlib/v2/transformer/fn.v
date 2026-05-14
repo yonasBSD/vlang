@@ -9,6 +9,33 @@ import v2.types
 
 // get_fn_type gets the signature for a function.
 fn (t &Transformer) get_fn_type(fn_name string) ?types.FnType {
+	if idx := fn_name.last_index('__') {
+		mod_prefix := fn_name[..idx]
+		short_name := fn_name[idx + 2..]
+		if mut scope := t.get_module_scope(mod_prefix) {
+			if obj := scope.lookup_parent(short_name, 0) {
+				if obj is types.Fn {
+					fn_typ := obj.get_typ()
+					if fn_typ is types.FnType {
+						return fn_typ
+					}
+				}
+			}
+		}
+		if mod_prefix.contains('__') {
+			dotted_mod := mod_prefix.replace('__', '.')
+			if mut scope := t.get_module_scope(dotted_mod) {
+				if obj := scope.lookup_parent(short_name, 0) {
+					if obj is types.Fn {
+						fn_typ := obj.get_typ()
+						if fn_typ is types.FnType {
+							return fn_typ
+						}
+					}
+				}
+			}
+		}
+	}
 	// First try the current module scope.
 	if mut scope := t.get_module_scope(t.cur_module) {
 		if obj := scope.lookup_parent(fn_name, 0) {

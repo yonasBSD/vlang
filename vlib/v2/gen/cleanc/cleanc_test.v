@@ -16,6 +16,19 @@ fn test_should_emit_matcher_byte_set_contains_dependency() {
 	})
 }
 
+fn test_should_emit_searcher_core_pos_dependency() {
+	mut env := types.Environment.new()
+	mut gen := Gen.new_with_env([], env)
+	gen.set_used_fn_keys({
+		'main|f|main': true
+	})
+	assert gen.should_emit_fn_decl('searcher', ast.FnDecl{
+		name:      'pos'
+		is_method: true
+		typ:       ast.FnType{}
+	})
+}
+
 fn test_c_string_literal_content_to_c_single_line() {
 	out := c_string_literal_content_to_c('hello')
 	assert out == '"hello"'

@@ -6,6 +6,7 @@ import v2.ast
 import v2.parser
 import v2.pref as vpref
 import v2.token
+import v2.transformer
 import v2.types
 
 fn pos(id int) token.Pos {
@@ -32,6 +33,14 @@ fn mark_used_for_code(code string) map[string]bool {
 }
 
 fn mark_used_for_code_files(code_files map[string]string) map[string]bool {
+	return mark_used_for_code_files_with_transform(code_files, false)
+}
+
+fn mark_used_for_code_files_transformed(code_files map[string]string) map[string]bool {
+	return mark_used_for_code_files_with_transform(code_files, true)
+}
+
+fn mark_used_for_code_files_with_transform(code_files map[string]string, should_transform bool) map[string]bool {
 	tmp_dir := os.join_path(os.temp_dir(), 'v2_markused_test_${os.getpid()}')
 	os.mkdir_all(tmp_dir) or { panic('failed to create temp dir') }
 	defer {
@@ -47,10 +56,15 @@ fn mark_used_for_code_files(code_files map[string]string) map[string]bool {
 	prefs := &vpref.Preferences{}
 	mut file_set := token.FileSet.new()
 	mut par := parser.Parser.new(prefs)
-	files := par.parse_files(paths, mut file_set)
+	mut files := par.parse_files(paths, mut file_set)
 	env := types.Environment.new()
 	mut checker := types.Checker.new(prefs, file_set, env)
 	checker.check_files(files)
+	if should_transform {
+		mut trans := transformer.Transformer.new_with_pref(files, env, prefs)
+		trans.set_file_set(file_set)
+		files = trans.transform_files(files)
+	}
 	return mark_used(files, env)
 }
 
@@ -255,7 +269,7 @@ fn test_interface_arg() {
 }
 
 fn test_mark_used_tracks_interface_arg_to_pointer_receiver_method() {
-	used := mark_used_for_code_files({
+	used := mark_used_for_code_files_transformed({
 		'searcher.v': '
 module searcher
 
@@ -299,6 +313,141 @@ pub fn NoCaptures.new() NoCaptures {
 	})
 	assert has_used_key_containing(used, 'searcher|m|LiteralMatcher|new_captures')
 	assert has_used_key_containing(used, 'matcher|m|NoCaptures|new')
+}
+
+fn test_mark_used_tracks_string_interpolation_str_method() {
+	used := mark_used_for_code_files_transformed({
+		'main.v': '
+module main
+
+struct Thing {
+	x int
+}
+
+fn test_interpolation_str() {
+	t := Thing{}
+	_ = "\${t}"
+}
+'
+	})
+	assert has_used_key_containing(used, 'main|f|Thing__str')
+}
+
+fn test_mark_used_tracks_string_interpolation_str_method_for_field() {
+	used := mark_used_for_code_files_transformed({
+		'main.v': '
+module main
+
+struct Term {
+	x int
+}
+
+struct Holder {
+	term Term
+}
+
+fn test_interpolation_field_str() {
+	h := Holder{}
+	_ = "\${h.term}"
+}
+'
+	})
+	assert has_used_key_containing(used, 'main|f|Term__str')
+}
+
+fn test_mark_used_tracks_string_interpolation_str_method_for_receiver_field() {
+	used := mark_used_for_code_files_transformed({
+		'main.v': '
+module main
+
+struct Term {
+	x int
+}
+
+struct Holder {
+	term Term
+}
+
+fn (h Holder) msg() string {
+	return "\${h.term}"
+}
+
+fn test_interpolation_receiver_field_str() {
+	_ = Holder{}.msg()
+}
+'
+	})
+	assert has_used_key_containing(used, 'main|f|Term__str')
+}
+
+fn test_mark_used_tracks_string_interpolation_str_method_for_imported_field() {
+	used := mark_used_for_code_files_transformed({
+		'main.v': '
+module main
+
+import matcher
+
+struct Holder {
+	term matcher.LineTerminator
+}
+
+fn (h Holder) msg() string {
+	return "\${h.term}"
+}
+
+fn test_interpolation_imported_field_str() {
+	_ = Holder{}.msg()
+}
+'
+		'matcher.v': '
+module matcher
+
+pub struct LineTerminator {
+	byte u8
+}
+'
+	})
+	assert has_used_key_containing(used, 'matcher|f|matcher__LineTerminator__str')
+}
+
+fn test_mark_used_tracks_result_error_return_methods() {
+	used := mark_used_for_code_files_transformed({
+		'main.v': '
+module main
+
+struct Term {
+	x int
+}
+
+struct MyError {
+	term Term
+}
+
+fn MyError.new() MyError {
+	return MyError{}
+}
+
+fn (err MyError) msg() string {
+	return "\${err.term}"
+}
+
+fn (err MyError) code() int {
+	_ = err
+	return 0
+}
+
+fn fail() ! {
+	return MyError.new()
+}
+
+fn test_result_error() {
+	fail() or {}
+}
+'
+	})
+	assert has_used_key_containing(used, 'main|m|MyError|msg')
+	assert has_used_key_containing(used, 'main|m|MyError|code')
+	assert has_used_key_containing(used, 'main|f|Term__str')
 }
 
 fn test_mark_used_tracks_method_calls_with_env_types() {

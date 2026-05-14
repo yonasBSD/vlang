@@ -780,7 +780,7 @@ fn (mut g Gen) gen_struct_decl(node ast.StructDecl) {
 	g.sb.writeln('};')
 	// Emit fallback str macros for structs without explicit str() methods
 	struct_str_fn := '${name}__str'
-	if struct_str_fn !in g.fn_return_types {
+	if struct_str_fn !in g.declared_fn_names {
 		label := '${name}{}'
 		g.sb.writeln('#define ${name}__str(v) ((string){.str = "${label}", .len = ${label.len}, .is_lit = 1})')
 		g.emitted_types['macro_${name}__str'] = true
@@ -788,7 +788,7 @@ fn (mut g Gen) gen_struct_decl(node ast.StructDecl) {
 		g.fn_return_types[struct_str_fn] = 'string'
 	}
 	struct_short_str_fn := '${name}_str'
-	if struct_short_str_fn !in g.fn_return_types {
+	if struct_short_str_fn !in g.declared_fn_names {
 		g.sb.writeln('#define ${name}_str(v) ${name}__str(v)')
 		g.emitted_types['macro_${name}_str'] = true
 	}
@@ -1423,7 +1423,7 @@ fn unwrap_alias_type(typ types.Type) types.Type {
 
 fn struct_field_needs_explicit_default(field types.Field) bool {
 	field_type := unwrap_alias_type(field.typ)
-	return field_type is types.Array || field_type is types.String
+	return field_type is types.Array || field_type is types.String || field_type is types.OptionType
 }
 
 fn (mut g Gen) struct_field_needs_explicit_default_for(struct_type string, env_struct types.Struct, field types.Field) bool {
@@ -1445,6 +1445,9 @@ fn (mut g Gen) write_struct_field_default_value(field types.Field) bool {
 	if field_type is types.String {
 		g.sb.write_string(c_empty_v_string_expr())
 		return true
+	}
+	if field_type is types.OptionType {
+		return g.gen_none_literal_for_type(g.types_type_to_c(field_type))
 	}
 	return false
 }

@@ -158,7 +158,7 @@ fn (mut g Gen) should_emit_fn_decl(module_name string, decl ast.FnDecl) bool {
 		return true
 	}
 	if module_name == 'searcher'
-		&& decl.name in ['multi_line_with_matcher', 'line_terminator', 'buffer', 'bytes_range_in_buffer', 'bytes', 'binary_byte_offset', 'byte_count', 'binary_detection', 'quit_byte', 'count', 'lines', 'new'] {
+		&& decl.name in ['multi_line_with_matcher', 'line_terminator', 'buffer', 'bytes_range_in_buffer', 'bytes', 'binary_byte_offset', 'byte_count', 'binary_detection', 'quit_byte', 'count', 'lines', 'new', 'pos'] {
 		return true
 	}
 	if module_name == 'log'
@@ -179,16 +179,6 @@ fn (mut g Gen) should_emit_fn_decl(module_name string, decl ast.FnDecl) bool {
 	// which runs after markused, so they won't be in used_fn_keys.
 	if decl.name == 'init' || decl.name == 'deinit' {
 		return true
-	}
-	if decl.is_method || decl.is_static {
-		fn_name := g.get_fn_name(decl)
-		if fn_name != '' {
-			for _, spec in g.interface_wrapper_specs {
-				if spec.fn_name == fn_name {
-					return true
-				}
-			}
-		}
 	}
 	// Methods on array types ([]T) and other types with unresolvable receivers
 	// may produce 'unknown' receiver in the markused key, causing them to be
@@ -539,6 +529,7 @@ fn (mut g Gen) register_fn_signature(node ast.FnDecl, fn_name string) {
 	if fn_name == '' {
 		return
 	}
+	g.declared_fn_names[fn_name] = true
 	// If this function has an @[export] attribute, map the V-qualified
 	// name to the export name so call sites resolve correctly.
 	for attr in node.attributes {

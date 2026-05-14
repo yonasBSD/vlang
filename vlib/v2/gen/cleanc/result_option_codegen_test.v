@@ -2,6 +2,7 @@
 module cleanc
 
 import os
+import v2.markused
 import v2.parser
 import v2.pref as vpref
 import v2.token
@@ -29,6 +30,30 @@ fn generate_result_option_c_for_test(code string) string {
 	return gen.gen()
 }
 
+fn generate_markused_c_for_test(code string) string {
+	tmp_file := os.join_path(os.temp_dir(), 'v2_markused_codegen_test_${os.getpid()}.v')
+	os.write_file(tmp_file, code) or { panic('failed to write temp file') }
+	defer {
+		os.rm(tmp_file) or {}
+	}
+	prefs := &vpref.Preferences{
+		backend:     .cleanc
+		no_parallel: true
+	}
+	mut file_set := token.FileSet.new()
+	mut par := parser.Parser.new(prefs)
+	files := par.parse_files([tmp_file], mut file_set)
+	env := types.Environment.new()
+	mut checker := types.Checker.new(prefs, file_set, env)
+	checker.check_files(files)
+	mut trans := transformer.Transformer.new_with_pref(files, env, prefs)
+	gen_files := trans.transform_files(files)
+	used := markused.mark_used(gen_files, env)
+	mut gen := Gen.new_with_env_and_pref(gen_files, env, prefs)
+	gen.set_used_fn_keys(used)
+	return gen.gen()
+}
+
 fn test_generate_c_keeps_option_wrapper_for_fn_value_if_guard() {
 	csrc := generate_result_option_c_for_test("
 fn with_name_to_index(name_to_index fn (string) ?int) {
@@ -37,6 +62,7 @@ fn with_name_to_index(name_to_index fn (string) ?int) {
 	}
 }
 ")
+	println(csrc)
 	assert csrc.contains('_option_int _or_t')
 	assert csrc.contains('if ((_or_t')
 	assert !csrc.contains('void* _or_t')
@@ -123,6 +149,72 @@ fn make(r &Ref) Holder {
 	assert csrc.contains('_option_Refptr item;')
 	assert csrc.contains('_option_Refptr _opt = (_option_Refptr){ .state = 2 }; Ref* _val = r; _option_ok(&_val, (_option*)&_opt, sizeof(_val)); _opt;')
 	assert !csrc.contains('.item = r')
+}
+
+fn test_generate_c_initializes_omitted_option_struct_fields_to_none() {
+	csrc := generate_result_option_c_for_test('
+struct Holder {
+	item ?int
+	name string
+}
+
+fn make_named() Holder {
+	return Holder{
+		name: "x"
+	}
+}
+
+fn make_empty() Holder {
+	return Holder{}
+}
+')
+	assert csrc.contains('.item = ((_option_int){.state = 2})')
+	assert !csrc.contains('return ((Holder){0})')
+}
+
+fn test_generate_c_emits_struct_str_function_when_interpolated() {
+	csrc := generate_result_option_c_for_test('
+struct Thing {
+	x int
+}
+
+fn msg(t Thing) string {
+	return "\${t}"
+}
+')
+	assert csrc.contains('string Thing__str(Thing s)')
+	assert csrc.contains('Thing__str(t).str')
+}
+
+fn test_generate_c_does_not_emit_unused_error_method_with_unwalked_str_dependency() {
+	csrc := generate_markused_c_for_test('
+struct Term {
+	x int
+}
+
+struct MyError {
+	term Term
+}
+
+fn (err MyError) msg() string {
+	return "\${err.term}"
+}
+
+fn (err MyError) code() int {
+	_ = err
+	return 0
+}
+
+fn unused() ! {
+	return MyError{}
+}
+
+fn test_unused_error() {
+	assert true
+}
+')
+	assert !csrc.contains('string MyError__msg(MyError err)')
+	assert !csrc.contains('Term__str((err).term)')
 }
 
 fn test_generate_c_borrows_option_field_unwrap_payload_without_temp() {

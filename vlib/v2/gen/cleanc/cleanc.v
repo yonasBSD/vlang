@@ -27,6 +27,7 @@ mut:
 	fn_param_is_ptr        map[string][]bool
 	fn_param_types         map[string][]string
 	fn_return_types        map[string]string
+	declared_fn_names      map[string]bool
 	runtime_local_types    map[string]string
 	cur_fn_returned_idents map[string]bool
 	active_generic_types   map[string]types.Type
@@ -237,6 +238,7 @@ pub fn Gen.new_with_env_and_pref(files []ast.File, env &types.Environment, p &pr
 		fn_param_is_ptr:           map[string][]bool{}
 		fn_param_types:            map[string][]string{}
 		fn_return_types:           map[string]string{}
+		declared_fn_names:         map[string]bool{}
 		runtime_local_types:       map[string]string{}
 		cur_fn_returned_idents:    map[string]bool{}
 		active_generic_types:      map[string]types.Type{}
@@ -1441,6 +1443,7 @@ pub fn (g &Gen) new_pass5_worker(file_indices []int, worker_id int) &Gen {
 		fn_param_is_ptr:             g.fn_param_is_ptr.clone()
 		fn_param_types:              g.fn_param_types.clone()
 		fn_return_types:             g.fn_return_types.clone()
+		declared_fn_names:           g.declared_fn_names.clone()
 		struct_field_types:          g.struct_field_types.clone()
 		enum_value_to_enum:          g.enum_value_to_enum.clone()
 		enum_type_fields:            g.enum_type_fields.clone()

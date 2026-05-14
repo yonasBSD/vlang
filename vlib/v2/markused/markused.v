@@ -60,6 +60,7 @@ mut:
 	interface_type_names   map[string]bool
 	interface_method_names map[string][]string
 	methods_by_receiver    map[string][]int
+	struct_field_receivers map[string][]string
 
 	lookup map[string][]int
 
@@ -94,6 +95,7 @@ fn new_walker(files []ast.File, env &types.Environment) Walker {
 		interface_type_names:   map[string]bool{}
 		interface_method_names: map[string][]string{}
 		methods_by_receiver:    map[string][]int{}
+		struct_field_receivers: map[string][]string{}
 		lookup:                 map[string][]int{}
 	}
 }
@@ -148,6 +150,7 @@ fn (mut w Walker) collect_defs() {
 			match stmt {
 				ast.StructDecl {
 					w.add_type_name(mod_name, stmt.name)
+					w.add_struct_field_receivers(mod_name, stmt)
 				}
 				ast.EnumDecl {
 					w.add_type_name(mod_name, stmt.name)
@@ -389,6 +392,49 @@ fn receiver_type_expr_name(expr ast.Expr) string {
 	return ''
 }
 
+fn type_expr_receiver_candidates(mod_name string, expr ast.Expr) []string {
+	mut out := []string{}
+	match expr {
+		ast.SelectorExpr {
+			if expr.lhs is ast.Ident {
+				add_receiver_name_candidates(mut out, mod_name, expr.rhs.name)
+				add_unique_string(mut out, '${expr.lhs.name}__${expr.rhs.name}')
+			}
+		}
+		ast.PrefixExpr {
+			if expr.op == .amp {
+				return type_expr_receiver_candidates(mod_name, expr.expr)
+			}
+		}
+		ast.ModifierExpr {
+			return type_expr_receiver_candidates(mod_name, expr.expr)
+		}
+		ast.GenericArgs {
+			return type_expr_receiver_candidates(mod_name, expr.lhs)
+		}
+		ast.GenericArgOrIndexExpr {
+			return type_expr_receiver_candidates(mod_name, expr.lhs)
+		}
+		ast.Type {
+			match expr {
+				ast.PointerType {
+					return type_expr_receiver_candidates(mod_name, expr.base_type)
+				}
+				ast.GenericType {
+					return type_expr_receiver_candidates(mod_name, expr.name)
+				}
+				else {}
+			}
+		}
+		else {}
+	}
+	name := receiver_type_expr_name(expr)
+	if name != '' {
+		add_receiver_name_candidates(mut out, mod_name, name)
+	}
+	return out
+}
+
 fn receiver_names_from_decl(mod_name string, decl ast.FnDecl, env &types.Environment) []string {
 	mut out := []string{}
 	add_receiver_name_candidates(mut out, mod_name, receiver_type_expr_name(decl.receiver.typ))
@@ -569,6 +615,25 @@ fn (mut w Walker) add_interface_decl(mod_name string, decl ast.InterfaceDecl) {
 			w.interface_method_names[iface_name] = existing
 		} else {
 			w.interface_method_names[iface_name] = method_names.clone()
+		}
+	}
+}
+
+fn (mut w Walker) add_struct_field_receivers(mod_name string, decl ast.StructDecl) {
+	mut struct_names := []string{}
+	add_receiver_name_candidates(mut struct_names, mod_name, decl.name)
+	for field in decl.fields {
+		field_receivers := type_expr_receiver_candidates(mod_name, field.typ)
+		if field_receivers.len == 0 {
+			continue
+		}
+		for struct_name in struct_names {
+			key := '${struct_name}:${field.name}'
+			mut existing := w.struct_field_receivers[key] or { []string{} }
+			for receiver in field_receivers {
+				add_unique_string(mut existing, receiver)
+			}
+			w.struct_field_receivers[key] = existing
 		}
 	}
 }
@@ -835,39 +900,203 @@ fn (mut w Walker) mark_interface_conversion_methods_for_name(iface_name string, 
 }
 
 fn (mut w Walker) mark_call_arg_interface_conversions(expr ast.CallExpr, mod_name string) {
+	mut marked := false
 	if w.env == unsafe { nil } {
+		w.mark_call_arg_interface_conversions_from_decls(expr.lhs, expr.args, mod_name)
 		return
 	}
-	lhs_type := w.call_lhs_fn_type(expr.lhs, mod_name) or { return }
-	param_types := lhs_type.get_param_types()
-	param_offset := if expr.lhs is ast.SelectorExpr { 1 } else { 0 }
-	for i, arg in expr.args {
-		param_idx := i + param_offset
-		if param_idx >= param_types.len {
-			break
+	if lhs_type := w.call_lhs_fn_type(expr.lhs, mod_name) {
+		param_types := lhs_type.get_param_types()
+		param_offset := if expr.lhs is ast.SelectorExpr { 1 } else { 0 }
+		for i, arg in expr.args {
+			param_idx := i + param_offset
+			if param_idx >= param_types.len {
+				break
+			}
+			param_type := param_types[param_idx]
+			if param_type is types.Interface {
+				w.mark_interface_conversion_methods_for_name((param_type as types.Interface).name,
+					arg, mod_name)
+				marked = true
+			}
 		}
-		param_type := param_types[param_idx]
-		if param_type is types.Interface {
-			w.mark_interface_conversion_methods_for_name((param_type as types.Interface).name, arg,
-				mod_name)
-		}
+	}
+	if !marked {
+		w.mark_call_arg_interface_conversions_from_decls(expr.lhs, expr.args, mod_name)
 	}
 }
 
 fn (mut w Walker) mark_call_or_cast_arg_interface_conversion(expr ast.CallOrCastExpr, mod_name string) {
+	mut marked := false
 	if w.env == unsafe { nil } {
+		w.mark_call_arg_interface_conversions_from_decls(expr.lhs, [expr.expr], mod_name)
 		return
 	}
-	lhs_type := w.call_lhs_fn_type(expr.lhs, mod_name) or { return }
-	param_types := lhs_type.get_param_types()
-	param_offset := if expr.lhs is ast.SelectorExpr { 1 } else { 0 }
-	if param_offset >= param_types.len {
+	if lhs_type := w.call_lhs_fn_type(expr.lhs, mod_name) {
+		param_types := lhs_type.get_param_types()
+		param_offset := if expr.lhs is ast.SelectorExpr { 1 } else { 0 }
+		if param_offset < param_types.len {
+			param_type := param_types[param_offset]
+			if param_type is types.Interface {
+				w.mark_interface_conversion_methods_for_name((param_type as types.Interface).name,
+					expr.expr, mod_name)
+				marked = true
+			}
+		}
+	}
+	if !marked {
+		w.mark_call_arg_interface_conversions_from_decls(expr.lhs, [expr.expr], mod_name)
+	}
+}
+
+fn (w &Walker) add_lookup_indices(key string, mut out []int) {
+	if key in w.lookup {
+		for idx in w.lookup[key] {
+			add_unique_int(mut out, idx)
+		}
+	}
+}
+
+fn (w &Walker) add_fn_name_indices(name string, mod_name string, mut out []int) {
+	if name == '' {
 		return
 	}
-	param_type := param_types[param_offset]
-	if param_type is types.Interface {
-		w.mark_interface_conversion_methods_for_name((param_type as types.Interface).name,
-			expr.expr, mod_name)
+	for candidate in called_fn_name_candidates(name) {
+		w.add_lookup_indices('mod:${mod_name}:${candidate}', mut out)
+		w.add_lookup_indices('fn:${candidate}', mut out)
+		if !candidate.contains('__') && mod_name != '' && mod_name != 'main'
+			&& mod_name != 'builtin' {
+			w.add_lookup_indices('fn:${mod_name}__${candidate}', mut out)
+		}
+	}
+}
+
+fn (w &Walker) add_method_name_indices(name string, receivers []string, mut out []int) {
+	normalized := normalize_method_name(name)
+	for receiver in receivers {
+		for candidate in receiver_lookup_candidates(receiver) {
+			w.add_lookup_indices('meth:${candidate}:${name}', mut out)
+			if normalized != name {
+				w.add_lookup_indices('meth:${candidate}:${normalized}', mut out)
+			}
+		}
+	}
+}
+
+fn (w &Walker) call_lhs_decl_indices(lhs ast.Expr, mod_name string) []int {
+	mut out := []int{}
+	match lhs {
+		ast.Ident {
+			w.add_fn_name_indices(lhs.name, mod_name, mut out)
+		}
+		ast.GenericArgs {
+			return w.call_lhs_decl_indices(lhs.lhs, mod_name)
+		}
+		ast.GenericArgOrIndexExpr {
+			return w.call_lhs_decl_indices(lhs.lhs, mod_name)
+		}
+		ast.SelectorExpr {
+			method_name := lhs.rhs.name
+			if lhs.lhs is ast.Ident {
+				left_name := lhs.lhs.name
+				if left_name == 'C' {
+					w.add_fn_name_indices(method_name, mod_name, mut out)
+					return out
+				}
+				if left_name in w.module_names {
+					real_mod := w.module_alias_to_real[left_name] or { left_name }
+					w.add_fn_name_indices('${real_mod}__${method_name}', mod_name, mut out)
+					return out
+				}
+				if left_name in w.type_names {
+					w.add_method_name_indices(method_name, [left_name, '${mod_name}__${left_name}'],
+						mut out)
+					return out
+				}
+			}
+			if lhs.lhs is ast.SelectorExpr {
+				type_sel := lhs.lhs as ast.SelectorExpr
+				if type_sel.lhs is ast.Ident {
+					mod_ident := type_sel.lhs.name
+					type_name := type_sel.rhs.name
+					if mod_ident in w.module_names || mod_ident in w.type_names {
+						candidates := [
+							type_name,
+							'${mod_name}__${type_name}',
+							'${mod_ident}__${type_name}',
+						]
+						w.add_method_name_indices(method_name, candidates, mut out)
+						return out
+					}
+				}
+			}
+			receivers := w.receiver_candidates_for_expr(lhs.lhs, mod_name)
+			if receivers.len > 0 {
+				w.add_method_name_indices(method_name, receivers, mut out)
+				if out.len > 0 {
+					return out
+				}
+			}
+			normalized := normalize_method_name(method_name)
+			w.add_lookup_indices('mname:${method_name}', mut out)
+			if normalized != method_name {
+				w.add_lookup_indices('mname:${normalized}', mut out)
+			}
+		}
+		else {}
+	}
+	return out
+}
+
+fn (mut w Walker) mark_call_arg_interface_conversions_from_decls(lhs ast.Expr, args []ast.Expr, mod_name string) {
+	decl_indices := w.call_lhs_decl_indices(lhs, mod_name)
+	if decl_indices.len == 0 {
+		return
+	}
+	for idx in decl_indices {
+		if idx < 0 || idx >= w.fns.len {
+			continue
+		}
+		info := w.fns[idx]
+		params := info.decl.typ.params
+		arg_offset := if lhs is ast.Ident && info.decl.is_method && !info.decl.is_static {
+			1
+		} else {
+			0
+		}
+		for i, param in params {
+			arg_idx := i + arg_offset
+			if arg_idx >= args.len {
+				break
+			}
+			iface_name := w.interface_name_from_expr(param.typ, info.mod)
+			if iface_name == '' {
+				continue
+			}
+			w.mark_interface_conversion_methods_for_name(iface_name, args[arg_idx], mod_name)
+		}
+	}
+}
+
+fn (mut w Walker) mark_string_interpolation_str_dependency(expr ast.Expr, mod_name string) {
+	receivers := w.receiver_candidates_for_expr(expr, mod_name)
+	if receivers.len == 0 {
+		return
+	}
+	w.mark_method_name('str', receivers)
+	for receiver in receivers {
+		w.mark_fn_name('${receiver}__str', mod_name)
+	}
+}
+
+fn (mut w Walker) mark_result_error_return_methods(return_type ast.Expr, expr ast.Expr, mod_name string) {
+	if return_type is ast.Type && return_type is ast.ResultType {
+		receivers := w.receiver_candidates_for_expr(expr, mod_name)
+		if receivers.len == 0 {
+			return
+		}
+		w.mark_method_name('msg', receivers)
+		w.mark_method_name('code', receivers)
 	}
 }
 
@@ -967,6 +1196,17 @@ fn (w &Walker) receiver_candidates_for_expr(expr ast.Expr, mod_name string) []st
 					type_name := selector.lhs.name
 					if type_name in w.type_names {
 						add_receiver_name_candidates(mut out, mod_name, type_name)
+					}
+				}
+			}
+		}
+		ast.SelectorExpr {
+			lhs_receivers := w.receiver_candidates_for_expr(expr.lhs, mod_name)
+			for lhs_receiver in lhs_receivers {
+				key := '${lhs_receiver}:${expr.rhs.name}'
+				if field_receivers := w.struct_field_receivers[key] {
+					for field_receiver in field_receivers {
+						add_unique_string(mut out, field_receiver)
 					}
 				}
 			}
@@ -1117,6 +1357,7 @@ fn (mut w Walker) walk_stmt(stmt ast.Stmt, mod_name string) {
 				// is a concrete struct InitExpr, mark the concrete type's
 				// interface methods so the vtable wrapper can call them.
 				w.mark_interface_conversion_methods(w.cur_fn_decl.typ.return_type, expr, mod_name)
+				w.mark_result_error_return_methods(w.cur_fn_decl.typ.return_type, expr, mod_name)
 			}
 		}
 		ast.StructDecl {
@@ -1304,6 +1545,7 @@ fn (mut w Walker) walk_expr(expr ast.Expr, mod_name string) {
 		}
 		ast.StringInterLiteral {
 			for inter in expr.inters {
+				w.mark_string_interpolation_str_dependency(inter.expr, mod_name)
 				w.walk_expr(inter.expr, mod_name)
 				w.walk_expr(inter.format_expr, mod_name)
 			}

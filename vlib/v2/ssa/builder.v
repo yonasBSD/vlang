@@ -76,6 +76,9 @@ mut:
 	// Array element types by variable name (for transformer-generated functions
 	// where checker position info is unavailable). Maps param/var name to element SSA type.
 	array_elem_types map[string]TypeID
+	// Local receiver type hints for aliases that collapse to primitive SSA shapes.
+	// Example: strings.Builder is []u8, but its methods must resolve before Array_i8 methods.
+	local_receiver_types map[string]string
 }
 
 struct LoopInfo {
@@ -2546,6 +2549,7 @@ pub fn (mut b Builder) build_fn(decl ast.FnDecl) {
 	b.mut_ptr_params = map[string]bool{}
 	b.label_blocks = map[string]BlockID{}
 	b.array_elem_types = map[string]TypeID{}
+	b.local_receiver_types = map[string]string{}
 
 	// Clear params (they were registered in register_fn_sig for forward decls,
 	// but we need to re-create them here with proper alloca bindings)
@@ -2702,7 +2706,12 @@ fn (mut b Builder) build_stmt(stmt ast.Stmt) {
 		ast.EmptyStmt {}
 		ast.AsmStmt {}
 		ast.ForInStmt {
-			panic('SSA builder: ForInStmt should have been lowered by transformer')
+			fn_name := if b.cur_func >= 0 && b.cur_func < b.mod.funcs.len {
+				b.mod.funcs[b.cur_func].name
+			} else {
+				'unknown'
+			}
+			panic('SSA builder: ForInStmt should have been lowered by transformer in ${fn_name}')
 		}
 	}
 }
@@ -2728,7 +2737,71 @@ fn (mut b Builder) unwrap_ident(expr ast.Expr) ?ast.Ident {
 	if expr is ast.ModifierExpr {
 		return b.unwrap_ident(expr.expr)
 	}
+	ident_name, has_ident_name := ast_expr_raw_ident_name(expr)
+	if has_ident_name {
+		return ast.Ident{
+			name: ident_name
+		}
+	}
 	return none
+}
+
+fn ast_expr_raw_ident_name(expr ast.Expr) (string, bool) {
+	if expr is ast.Ident {
+		return expr.name, true
+	}
+	expr_tag := unsafe { (&u64(&expr))[0] }
+	// ast.Expr Ident variant in the native sumtype layout.
+	if expr_tag != 13 {
+		return '', false
+	}
+	ident_data := unsafe { (&u64(&expr))[1] }
+	if ident_data == 0 {
+		return '', false
+	}
+	ident := unsafe { &ast.Ident(voidptr(ident_data)) }
+	return ident.name, true
+}
+
+fn (b &Builder) value_is_call_to(val_id ValueID, fn_name string) bool {
+	if val_id <= 0 || val_id >= b.mod.values.len {
+		return false
+	}
+	val := b.mod.values[val_id]
+	if val.kind != .instruction || val.index < 0 || val.index >= b.mod.instrs.len {
+		return false
+	}
+	instr := b.mod.instrs[val.index]
+	if instr.op != .call || instr.operands.len == 0 {
+		return false
+	}
+	callee_id := instr.operands[0]
+	if callee_id <= 0 || callee_id >= b.mod.values.len {
+		return false
+	}
+	callee := b.mod.values[callee_id]
+	return callee.kind == .func_ref && callee.name == fn_name
+}
+
+fn (b &Builder) alloca_has_store_from_call(var_id ValueID, fn_name string) bool {
+	if var_id <= 0 || var_id >= b.mod.values.len {
+		return false
+	}
+	for use_id in b.mod.values[var_id].uses {
+		if use_id <= 0 || use_id >= b.mod.values.len {
+			continue
+		}
+		use_val := b.mod.values[use_id]
+		if use_val.kind != .instruction || use_val.index < 0 || use_val.index >= b.mod.instrs.len {
+			continue
+		}
+		instr := b.mod.instrs[use_val.index]
+		if instr.op == .store && instr.operands.len >= 2 && instr.operands[1] == var_id
+			&& b.value_is_call_to(instr.operands[0], fn_name) {
+			return true
+		}
+	}
+	return false
 }
 
 fn (mut b Builder) build_assign(stmt ast.AssignStmt) {
@@ -2851,12 +2924,18 @@ fn (mut b Builder) build_assign(stmt ast.AssignStmt) {
 					[]ValueID{})
 				b.mod.add_instr(.store, b.cur_block, 0, [rhs_val, alloca])
 				b.vars[ident.name] = alloca
+				if b.value_is_call_to(rhs_val, 'strings__new_builder') {
+					b.local_receiver_types[ident.name] = 'strings__Builder'
+				}
 			} else if ident.name == '_' && stmt.op == .assign {
 				// Discard for plain assignment only; compound assignments (+=, etc.)
 				// must still execute (e.g. for loop counter `_ += 1`).
 				continue
 			} else {
 				// Assignment to existing variable (local or global)
+				if stmt.op == .assign {
+					b.local_receiver_types.delete(ident.name)
+				}
 				// Skip stores to const_array_globals — they are already initialized
 				// in the data segment. The runtime const init function would overwrite
 				// the first element with a stack pointer.
@@ -5456,6 +5535,17 @@ fn (mut b Builder) get_receiver_type_name(expr ast.Expr) string {
 	if expr is ast.StringLiteral || expr is ast.StringInterLiteral {
 		return 'string'
 	}
+	ident_name, has_ident_name := ast_expr_raw_ident_name(expr)
+	if has_ident_name {
+		if ident_name in b.local_receiver_types {
+			receiver_type := b.local_receiver_types[ident_name]
+			return receiver_type
+		}
+		if ident_name in b.vars
+			&& b.alloca_has_store_from_call(b.vars[ident_name], 'strings__new_builder') {
+			return 'strings__Builder'
+		}
+	}
 	if b.env != unsafe { nil } {
 		pos := expr.pos()
 		if pos.id != 0 {
@@ -5464,11 +5554,12 @@ fn (mut b Builder) get_receiver_type_name(expr ast.Expr) string {
 			}
 		}
 	}
-	if expr is ast.Ident {
+	if has_ident_name {
 		// Try to get the type from the SSA variable's alloca type.
 		// This is more reliable than env.get_expr_type in ARM64-compiled binaries
 		// where the type checker's expr_type_values may have corrupt entries.
-		if var_id := b.vars[expr.name] {
+		if ident_name in b.vars {
+			var_id := b.vars[ident_name]
 			mut var_type := b.mod.values[var_id].typ
 			// Alloca types are ptr(T), unwrap the pointer to get base type
 			if var_type != 0 {
@@ -5482,7 +5573,7 @@ fn (mut b Builder) get_receiver_type_name(expr ast.Expr) string {
 				}
 			}
 		}
-		return expr.name
+		return ident_name
 	}
 	// For CallExpr/CallOrCastExpr, try to infer receiver type from the called
 	// function's return type. This is needed when env.get_expr_type fails (e.g.,
