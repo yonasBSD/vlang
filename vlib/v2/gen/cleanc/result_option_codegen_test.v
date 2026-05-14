@@ -171,6 +171,37 @@ fn make_empty() Holder {
 	assert !csrc.contains('return ((Holder){0})')
 }
 
+fn test_generate_c_declares_specialized_generic_option_return() {
+	csrc := generate_result_option_c_for_test('
+module sample
+
+struct Item {}
+
+struct Match[T] {
+	value T
+	has_value bool
+}
+
+fn (m Match[T]) inner() ?T {
+	if !m.has_value {
+		return none
+	}
+	return m.value
+}
+
+fn use(m Match[Item]) bool {
+	if value := m.inner() {
+		_ = value
+		return true
+	}
+	return false
+}
+')
+	assert csrc.contains('typedef struct _option_sample__Item _option_sample__Item;')
+	assert csrc.contains('struct _option_sample__Item')
+	assert csrc.contains('_option_sample__Item sample__Match_T_sample__Item__inner')
+}
+
 fn test_generate_c_emits_struct_str_function_when_interpolated() {
 	csrc := generate_result_option_c_for_test('
 struct Thing {

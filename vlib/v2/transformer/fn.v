@@ -2404,6 +2404,9 @@ fn (t &Transformer) lookup_call_param_types(lhs ast.Expr) []types.Type {
 // name prefix used in method name mangling. For containers (array, map, string)
 // it returns the generic prefix; for named types it returns the qualified C name.
 fn (t &Transformer) receiver_type_to_c_prefix(typ types.Type) string {
+	if !is_type_valid(typ) {
+		return ''
+	}
 	match typ {
 		types.Array, types.ArrayFixed {
 			return 'array'
@@ -2415,6 +2418,9 @@ fn (t &Transformer) receiver_type_to_c_prefix(typ types.Type) string {
 			return 'string'
 		}
 		types.Alias {
+			if !is_type_valid(typ.base_type) {
+				return t.type_to_c_name(typ)
+			}
 			// Check if alias over container
 			match typ.base_type {
 				types.Array, types.ArrayFixed {

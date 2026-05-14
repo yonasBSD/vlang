@@ -558,6 +558,9 @@ fn (mut g Gen) register_fn_signature(node ast.FnDecl, fn_name string) {
 	} else {
 		'void'
 	}
+	if node.typ.return_type !is ast.EmptyExpr {
+		ret_type = g.specialized_generic_c_name_from_type_expr(node.typ.return_type, ret_type)
+	}
 	ret_type = normalize_signature_type_name(ret_type, 'void')
 	if ret_type == 'int' {
 		inferred := g.infer_vector_return_type_from_stmts(node.stmts)
@@ -2151,6 +2154,10 @@ fn (mut g Gen) gen_fn_head_with_name_ptr(node &ast.FnDecl, fn_name string) {
 		c_ret = 'int'
 	}
 	sig_param_types := g.fn_param_types[fn_name] or { []string{} }
+	g.emit_option_result_forward_typedef(ret)
+	for sig_param_type in sig_param_types {
+		g.emit_option_result_forward_typedef(normalize_signature_type_name(sig_param_type, 'void*'))
+	}
 
 	// main takes argc/argv
 	if fn_name == 'main' {

@@ -717,6 +717,41 @@ fn (mut g Gen) register_alias_type(name string) {
 	}
 }
 
+fn (mut g Gen) emit_option_result_forward_typedef(name string) {
+	if !name.starts_with('_option_') && !name.starts_with('_result_') {
+		return
+	}
+	if !is_c_identifier_like(name) {
+		return
+	}
+	key := 'forward_${name}'
+	if key in g.emitted_types {
+		return
+	}
+	g.emitted_types[key] = true
+	if name.starts_with('_option_') {
+		val_type := option_value_type(name)
+		if g.option_result_payload_invalid(val_type) {
+			return
+		}
+		if val_type != '' && val_type != 'void' {
+			g.sb.writeln('typedef struct ${name} ${name};')
+		} else {
+			g.sb.writeln('typedef _option ${name};')
+		}
+		return
+	}
+	val_type := g.result_value_type(name)
+	if g.option_result_payload_invalid(val_type) {
+		return
+	}
+	if val_type != '' && val_type != 'void' {
+		g.sb.writeln('typedef struct ${name} ${name};')
+	} else {
+		g.sb.writeln('typedef _result ${name};')
+	}
+}
+
 fn (mut g Gen) is_pointer_type(e ast.Expr) bool {
 	if e is ast.PrefixExpr {
 		return e.op == .amp

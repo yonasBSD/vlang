@@ -473,28 +473,12 @@ fn (mut g Gen) emit_runtime_aliases() {
 	mut option_names := g.option_aliases.keys()
 	option_names.sort()
 	for name in option_names {
-		val_type := option_value_type(name)
-		if g.option_result_payload_invalid(val_type) {
-			continue
-		}
-		if val_type != '' && val_type != 'void' {
-			g.sb.writeln('typedef struct ${name} ${name};')
-		} else {
-			g.sb.writeln('typedef _option ${name};')
-		}
+		g.emit_option_result_forward_typedef(name)
 	}
 	mut result_names := g.result_aliases.keys()
 	result_names.sort()
 	for name in result_names {
-		val_type := g.result_value_type(name)
-		if g.option_result_payload_invalid(val_type) {
-			continue
-		}
-		if val_type != '' && val_type != 'void' {
-			g.sb.writeln('typedef struct ${name} ${name};')
-		} else {
-			g.sb.writeln('typedef _result ${name};')
-		}
+		g.emit_option_result_forward_typedef(name)
 	}
 }
 

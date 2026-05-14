@@ -20,6 +20,20 @@ fn (mut g Gen) set_file_module(file ast.File) {
 	g.cur_module = 'main'
 }
 
+fn (mut g Gen) expr_with_expected_type(expected_type string, expr ast.Expr) bool {
+	if expected_type == '' || !g.is_enum_type(expected_type) {
+		return false
+	}
+	if expr is ast.SelectorExpr && expr.lhs is ast.EmptyExpr {
+		rhs_name := expr.rhs.name
+		if g.enum_has_field(expected_type, rhs_name) {
+			g.sb.write_string(g.enum_member_c_name(expected_type, rhs_name))
+			return true
+		}
+	}
+	return false
+}
+
 fn (mut g Gen) gen_stmts(stmts []ast.Stmt) {
 	if g.cur_fn_name == 'decode_value' && stmts.len > 0 {
 		C.fprintf(C.stderr, c'[gen_stmts] cur_fn=%s stmts.len=%d\n', g.cur_fn_name.str, stmts.len)
@@ -249,6 +263,7 @@ fn (mut g Gen) gen_stmt(node ast.Stmt) {
 				g.sb.write_string('return ({ ${g.cur_fn_ret_type} _opt = (${g.cur_fn_ret_type}){ .state = 2 }; ${value_type} _val = ')
 				if value_type in g.sum_type_variants {
 					g.gen_type_cast_expr(value_type, expr)
+				} else if g.expr_with_expected_type(value_type, expr) {
 				} else {
 					g.expr(expr)
 				}
@@ -282,6 +297,13 @@ fn (mut g Gen) gen_stmt(node ast.Stmt) {
 					return
 				}
 				value_type := g.result_value_type(g.cur_fn_ret_type)
+				if value_type != '' && g.is_enum_type(value_type) && expr is ast.SelectorExpr
+					&& expr.lhs is ast.EmptyExpr {
+					g.sb.write_string('return ({ ${g.cur_fn_ret_type} _res = (${g.cur_fn_ret_type}){0}; ${value_type} _val = ')
+					_ = g.expr_with_expected_type(value_type, expr)
+					g.sb.writeln('; _result_ok(&_val, (_result*)&_res, sizeof(_val)); _res; });')
+					return
+				}
 				if value_type in g.tuple_aliases && node.exprs.len > 1 {
 					field_types := g.tuple_aliases[value_type]
 					g.sb.write_string('return ({ ${g.cur_fn_ret_type} _res = (${g.cur_fn_ret_type}){0}; ${value_type} _val = (${value_type}){')
@@ -340,6 +362,7 @@ fn (mut g Gen) gen_stmt(node ast.Stmt) {
 				g.sb.write_string('return ({ ${g.cur_fn_ret_type} _res = (${g.cur_fn_ret_type}){0}; ${value_type} _val = ')
 				if value_type in g.sum_type_variants {
 					g.gen_type_cast_expr(value_type, expr)
+				} else if g.expr_with_expected_type(value_type, expr) {
 				} else if g.is_interface_type(value_type) {
 					// Mut params are pointers — dereference when returning as value
 					if expr is ast.Ident && expr.name in g.cur_fn_mut_params {

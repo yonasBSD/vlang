@@ -428,6 +428,7 @@ fn type_expr_receiver_candidates(mod_name string, expr ast.Expr) []string {
 		}
 		else {}
 	}
+
 	name := receiver_type_expr_name(expr)
 	if name != '' {
 		add_receiver_name_candidates(mut out, mod_name, name)
@@ -1009,8 +1010,8 @@ fn (w &Walker) call_lhs_decl_indices(lhs ast.Expr, mod_name string) []int {
 					return out
 				}
 				if left_name in w.type_names {
-					w.add_method_name_indices(method_name, [left_name, '${mod_name}__${left_name}'],
-						mut out)
+					w.add_method_name_indices(method_name,
+						[left_name, '${mod_name}__${left_name}'], mut out)
 					return out
 				}
 			}
@@ -1045,6 +1046,7 @@ fn (w &Walker) call_lhs_decl_indices(lhs ast.Expr, mod_name string) []int {
 		}
 		else {}
 	}
+
 	return out
 }
 

@@ -2001,6 +2001,14 @@ fn (mut b Builder) ast_type_to_ssa(typ ast.Expr) TypeID {
 	if has_raw_map_type {
 		return b.struct_types['map'] or { b.mod.type_store.get_int(64) }
 	}
+	raw_option_inner, has_raw_option := ast_expr_raw_option_type_inner(typ)
+	if has_raw_option {
+		return b.get_option_wrapper_type(b.ast_type_to_ssa(raw_option_inner))
+	}
+	raw_result_inner, has_raw_result := ast_expr_raw_result_type_inner(typ)
+	if has_raw_result {
+		return b.get_result_wrapper_type(b.ast_type_to_ssa(raw_result_inner))
+	}
 	raw_tuple_types, has_raw_tuple := ast_expr_raw_tuple_type_parts(typ)
 	if has_raw_tuple {
 		mut elem_types := []TypeID{cap: raw_tuple_types.len}
@@ -2706,12 +2714,7 @@ fn (mut b Builder) build_stmt(stmt ast.Stmt) {
 		ast.EmptyStmt {}
 		ast.AsmStmt {}
 		ast.ForInStmt {
-			fn_name := if b.cur_func >= 0 && b.cur_func < b.mod.funcs.len {
-				b.mod.funcs[b.cur_func].name
-			} else {
-				'unknown'
-			}
-			panic('SSA builder: ForInStmt should have been lowered by transformer in ${fn_name}')
+			panic('SSA builder: ForInStmt should have been lowered by transformer')
 		}
 	}
 }
@@ -6633,6 +6636,56 @@ fn ast_expr_raw_pointer_type_inner(expr ast.Expr) (ast.Expr, bool) {
 	unsafe {
 		(&u64(&inner))[0] = pointer_words[0]
 		(&u64(&inner))[1] = pointer_words[1]
+	}
+	return inner, true
+}
+
+fn ast_expr_raw_option_type_inner(expr ast.Expr) (ast.Expr, bool) {
+	if expr is ast.Type {
+		typ := expr as ast.Type
+		if typ is ast.OptionType {
+			ot := typ as ast.OptionType
+			return ot.base_type, true
+		}
+	}
+	return ast_expr_raw_type_with_base_inner(expr, 9)
+}
+
+fn ast_expr_raw_result_type_inner(expr ast.Expr) (ast.Expr, bool) {
+	if expr is ast.Type {
+		typ := expr as ast.Type
+		if typ is ast.ResultType {
+			rt := typ as ast.ResultType
+			return rt.base_type, true
+		}
+	}
+	return ast_expr_raw_type_with_base_inner(expr, 11)
+}
+
+fn ast_expr_raw_type_with_base_inner(expr ast.Expr, expected_type_tag u64) (ast.Expr, bool) {
+	expr_tag := unsafe { (&u64(&expr))[0] }
+	// ast.Expr Type variant in the native sumtype layout.
+	if expr_tag != 38 {
+		return ast.empty_expr, false
+	}
+	type_data := unsafe { (&u64(&expr))[1] }
+	if type_data == 0 {
+		return ast.empty_expr, false
+	}
+	type_words := unsafe { &u64(voidptr(type_data)) }
+	type_tag := unsafe { type_words[0] }
+	if type_tag != expected_type_tag {
+		return ast.empty_expr, false
+	}
+	inner_data := unsafe { type_words[1] }
+	if inner_data == 0 {
+		return ast.empty_expr, false
+	}
+	inner_words := unsafe { &u64(voidptr(inner_data)) }
+	mut inner := ast.empty_expr
+	unsafe {
+		(&u64(&inner))[0] = inner_words[0]
+		(&u64(&inner))[1] = inner_words[1]
 	}
 	return inner, true
 }

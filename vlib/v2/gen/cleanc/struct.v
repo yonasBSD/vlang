@@ -752,7 +752,7 @@ fn (mut g Gen) gen_struct_decl(node ast.StructDecl) {
 			has_shared_fields = true
 		}
 		field_type := field_lookup_type
-		g.sb.writeln('\t${field_type} ${field_name};')
+		g.sb.writeln('\t${c_decl_for_type_and_name(field_type, field_name)};')
 		// For union types, register the variant's sub-fields in embedded_field_owner
 		// so that `box.x` resolves to `box.GgRect.x` via embedded_owner_for().
 		if node.is_union {

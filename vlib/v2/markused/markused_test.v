@@ -382,7 +382,7 @@ fn test_interpolation_receiver_field_str() {
 
 fn test_mark_used_tracks_string_interpolation_str_method_for_imported_field() {
 	used := mark_used_for_code_files_transformed({
-		'main.v': '
+		'main.v':    '
 module main
 
 import matcher
