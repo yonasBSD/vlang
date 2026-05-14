@@ -2995,6 +2995,18 @@ fn (mut g Gen) record_generic_struct_bindings_with_parent(struct_base_name strin
 	if generic_param_names.len == 0 || generic_param_names.len != concrete_runtime_params.len {
 		return
 	}
+	prev_generic_types := g.active_generic_types.clone()
+	prev_generic_c_names := g.active_generic_c_names.clone()
+	mut parent_c_bindings := map[string]string{}
+	for name, typ in parent_bindings {
+		parent_c_bindings[name] = g.types_type_to_c(typ)
+	}
+	g.active_generic_types = parent_bindings.clone()
+	g.active_generic_c_names = parent_c_bindings.clone()
+	defer {
+		g.active_generic_types = prev_generic_types.clone()
+		g.active_generic_c_names = prev_generic_c_names.clone()
+	}
 	mut bindings := map[string]types.Type{}
 	mut c_bindings := map[string]string{}
 	mut param_c_names := []string{cap: concrete_runtime_params.len}
@@ -3077,7 +3089,7 @@ fn (mut g Gen) resolve_generic_struct_c_name(base_name string, concrete_params [
 	for inst in instances {
 		if inst.params_key == params_key {
 			body_key := 'body_${inst.c_name}'
-			if body_key !in g.emitted_types {
+			if body_key !in g.emitted_types && g.pass5_start_pos > 0 {
 				g.emit_late_generic_struct(base_name, inst)
 			}
 			return inst.c_name

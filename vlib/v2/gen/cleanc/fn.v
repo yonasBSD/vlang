@@ -1078,6 +1078,7 @@ fn (mut g Gen) discover_nested_generic_specs() {
 	for _ in 0 .. 8 {
 		mut added := false
 		for file in g.files {
+			g.set_file_module(file)
 			for stmt in file.stmts {
 				match stmt {
 					ast.FnDecl {
@@ -1258,6 +1259,15 @@ fn (mut g Gen) discover_nested_generic_specs_in_expr(expr ast.Expr, local_types 
 			}
 			return added
 		}
+		ast.InitExpr {
+			mut added := false
+			for field in expr.fields {
+				if g.discover_nested_generic_specs_in_expr(field.value, local_types) {
+					added = true
+				}
+			}
+			return added
+		}
 		ast.MatchExpr {
 			mut added := false
 			for branch in expr.branches {
@@ -1302,7 +1312,8 @@ fn (mut g Gen) discover_nested_generic_specs_from_call(expr ast.CallExpr, local_
 	if !generic_binding_map_complete(bindings, generic_params) {
 		return false
 	}
-	return g.add_late_generic_spec_for_decl(callee, bindings)
+	added := g.add_late_generic_spec_for_decl(callee, bindings)
+	return added
 }
 
 fn (mut g Gen) generic_fn_decl_for_call(expr ast.CallExpr) ?ast.FnDecl {
@@ -1314,6 +1325,17 @@ fn (mut g Gen) generic_fn_decl_for_call(expr ast.CallExpr) ?ast.FnDecl {
 		if lhs.lhs is ast.Ident && g.is_module_ident(lhs.lhs.name) {
 			mod_name := g.resolve_module_name(lhs.lhs.name)
 			return g.find_generic_fn_decl_by_base_name('${mod_name}__${sanitize_fn_ident(lhs.rhs.name)}')
+		}
+		if lhs.lhs is ast.Ident {
+			receiver_name := sanitize_fn_ident(lhs.lhs.name)
+			method_name := sanitize_fn_ident(lhs.rhs.name)
+			base_name := '${receiver_name}__${method_name}'
+			if g.cur_module != '' && g.cur_module != 'main' && g.cur_module != 'builtin' {
+				if decl := g.find_generic_fn_decl_by_base_name('${g.cur_module}__${base_name}') {
+					return decl
+				}
+			}
+			return g.find_generic_fn_decl_by_base_name(base_name)
 		}
 	}
 	return none

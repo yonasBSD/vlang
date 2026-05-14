@@ -789,7 +789,7 @@ pub fn (mut g Gen) gen_passes_1_to_4() {
 	// Repeat until no more progress (simple topo sort with wrapper side-effects).
 	for info in all_structs {
 		g.cur_module = info.mod
-		if g.struct_is_leaf(info.decl) {
+		if g.struct_is_leaf(info.decl) && g.struct_fields_resolved(info.decl) {
 			g.gen_struct_decl(info.decl)
 		}
 	}

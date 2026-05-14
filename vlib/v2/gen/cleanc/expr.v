@@ -364,11 +364,7 @@ fn (mut g Gen) gen_heap_interface_cast(type_name string, value_expr ast.Expr) bo
 	if concrete_type == '' || concrete_type == 'int' {
 		return false
 	}
-	base_concrete := if concrete_type.ends_with('*') {
-		concrete_type[..concrete_type.len - 1]
-	} else {
-		concrete_type
-	}
+	method_concrete := strip_pointer_type_name(concrete_type)
 	// Generate: ({ InterfaceType* _iface = malloc(sizeof(InterfaceType));
 	//             *_iface = (InterfaceType){._object = (void*)value, ...}; _iface; })
 	g.sb.write_string('({ ${type_name}* _iface_t = (${type_name}*)malloc(sizeof(${type_name})); *_iface_t = ((${type_name}){._object = ')
@@ -381,18 +377,18 @@ fn (mut g Gen) gen_heap_interface_cast(type_name string, value_expr ast.Expr) bo
 		g.expr(value_expr)
 		g.sb.write_string(')')
 	}
-	type_short := if base_concrete.contains('__') {
-		base_concrete.all_after_last('__')
+	type_short := if method_concrete.contains('__') {
+		method_concrete.all_after_last('__')
 	} else {
-		base_concrete
+		method_concrete
 	}
 	type_id := interface_type_id_for_name(type_short)
 	g.sb.write_string(', ._type_id = ${type_id}')
 	if methods := g.interface_methods[type_name] {
 		for method in methods {
-			mut fn_name := '${base_concrete}__${method.name}'
+			mut fn_name := '${method_concrete}__${method.name}'
 			if fn_name !in g.fn_param_is_ptr && fn_name !in g.fn_return_types {
-				resolved := g.resolve_embedded_method(base_concrete, method.name)
+				resolved := g.resolve_embedded_method(method_concrete, method.name)
 				if resolved != '' {
 					fn_name = resolved
 				}
@@ -400,12 +396,12 @@ fn (mut g Gen) gen_heap_interface_cast(type_name string, value_expr ast.Expr) bo
 			mut target_name := fn_name
 			if ptr_params := g.fn_param_is_ptr[fn_name] {
 				if ptr_params.len > 0 && !ptr_params[0] {
-					target_name = interface_wrapper_name(type_name, base_concrete, method.name)
+					target_name = interface_wrapper_name(type_name, method_concrete, method.name)
 					g.needed_interface_wrappers[target_name] = true
 					if target_name !in g.interface_wrapper_specs {
 						g.interface_wrapper_specs[target_name] = InterfaceWrapperSpec{
 							fn_name:       fn_name
-							concrete_type: base_concrete
+							concrete_type: method_concrete
 							method:        method
 						}
 					}
@@ -437,6 +433,7 @@ fn (mut g Gen) gen_interface_cast(type_name string, value_expr ast.Expr) bool {
 	} else {
 		concrete_type
 	}
+	method_concrete := strip_pointer_type_name(concrete_type)
 	if base_concrete == type_name {
 		g.expr(value_expr)
 		return true
@@ -488,22 +485,22 @@ fn (mut g Gen) gen_interface_cast(type_name string, value_expr ast.Expr) bool {
 			g.sb.write_string(')')
 		}
 	}
-	type_short := if base_concrete.contains('__') {
-		base_concrete.all_after_last('__')
+	type_short := if method_concrete.contains('__') {
+		method_concrete.all_after_last('__')
 	} else {
-		base_concrete
+		method_concrete
 	}
 	type_id := interface_type_id_for_name(type_short)
 	g.sb.write_string(', ._type_id = ${type_id}')
 	// Generate method function pointers from stored interface info
 	if methods := g.interface_methods[type_name] {
 		for method in methods {
-			mut fn_name := '${base_concrete}__${method.name}'
+			mut fn_name := '${method_concrete}__${method.name}'
 			// If the method doesn't exist on the concrete type directly,
 			// try resolving through embedded structs (e.g. ssl__SSLConn embeds
 			// openssl__SSLConn, so ssl__SSLConn__addr → openssl__SSLConn__addr).
 			if fn_name !in g.fn_param_is_ptr && fn_name !in g.fn_return_types {
-				resolved := g.resolve_embedded_method(base_concrete, method.name)
+				resolved := g.resolve_embedded_method(method_concrete, method.name)
 				if resolved != '' {
 					fn_name = resolved
 				}
@@ -511,12 +508,12 @@ fn (mut g Gen) gen_interface_cast(type_name string, value_expr ast.Expr) bool {
 			mut target_name := fn_name
 			if ptr_params := g.fn_param_is_ptr[fn_name] {
 				if ptr_params.len > 0 && !ptr_params[0] {
-					target_name = interface_wrapper_name(type_name, base_concrete, method.name)
+					target_name = interface_wrapper_name(type_name, method_concrete, method.name)
 					g.needed_interface_wrappers[target_name] = true
 					if target_name !in g.interface_wrapper_specs {
 						g.interface_wrapper_specs[target_name] = InterfaceWrapperSpec{
 							fn_name:       fn_name
-							concrete_type: base_concrete
+							concrete_type: method_concrete
 							method:        method
 						}
 					}
@@ -4029,7 +4026,12 @@ fn is_header_type_only_const_expr(expr ast.Expr) bool {
 
 fn (mut g Gen) gen_cast_expr(node ast.CastExpr) {
 	type_name := g.expr_type_to_c(node.typ)
+	expr_type_name := g.get_expr_type(node.expr).trim_space()
 	if type_name.starts_with('_option_') {
+		if expr_type_name == type_name {
+			g.expr(node.expr)
+			return
+		}
 		if is_none_like_expr(node.expr) {
 			g.sb.write_string('(${type_name}){ .state = 2 }')
 			return

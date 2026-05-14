@@ -5,6 +5,7 @@
 module markused
 
 import v2.ast
+import v2.token
 import v2.types
 
 // Guard functions for ARM64 backend where default-initialized sum types have NULL data pointers.
@@ -656,12 +657,31 @@ fn (mut w Walker) mark_fn(idx int) {
 	if idx < 0 || idx >= w.fns.len {
 		return
 	}
-	key := w.fns[idx].key
+	info := w.fns[idx]
+	key := info.key
 	if key in w.used_keys {
 		return
 	}
 	w.used_keys[key] = true
 	w.queue << idx
+	w.mark_generic_binding_receiver_methods(info)
+}
+
+fn (mut w Walker) mark_generic_binding_receiver_methods(info FnInfo) {
+	if w.env == unsafe { nil } || info.decl.typ.generic_params.len == 0 {
+		return
+	}
+	for key, bindings_list in w.env.generic_types {
+		if generic_base_name_from_key(key) != info.decl.name {
+			continue
+		}
+		for bindings in bindings_list {
+			for _, concrete in bindings {
+				receivers := type_name_candidates_from_type(info.mod, concrete)
+				w.mark_all_methods_for_receivers(receivers)
+			}
+		}
+	}
 }
 
 fn (w &Walker) lookup_count(key string) int {
@@ -786,6 +806,23 @@ fn (mut w Walker) mark_method_name_fallback(name string) {
 	if normalized != name {
 		w.mark_lookup('mname:${normalized}')
 	}
+}
+
+fn infix_operator_may_use_method(op token.Token) bool {
+	return op in [.plus, .minus, .mul, .div, .mod, .eq, .ne, .lt, .gt, .le, .ge, .pipe, .xor]
+}
+
+fn (mut w Walker) mark_infix_operator_method(expr ast.InfixExpr, mod_name string) {
+	if !infix_operator_may_use_method(expr.op) {
+		return
+	}
+	method_name := expr.op.str()
+	receivers := w.receiver_candidates_for_expr(expr.lhs, mod_name)
+	if receivers.len > 0 {
+		w.mark_method_name(method_name, receivers)
+		return
+	}
+	w.mark_method_name_fallback(method_name)
 }
 
 fn (mut w Walker) mark_all_methods_for_receivers(receivers []string) {
@@ -1134,6 +1171,49 @@ fn (w &Walker) call_lhs_fn_type(lhs ast.Expr, mod_name string) ?types.FnType {
 	return none
 }
 
+fn (w &Walker) current_param_receiver_candidates(name string, mod_name string) []string {
+	mut out := []string{}
+	if name == '' || w.cur_fn_decl.name == '' {
+		return out
+	}
+	for param in w.cur_fn_decl.typ.params {
+		if param.name != name {
+			continue
+		}
+		for receiver in type_expr_receiver_candidates(mod_name, param.typ) {
+			add_unique_string(mut out, receiver)
+		}
+		generic_name := receiver_type_expr_name(param.typ)
+		if generic_name == '' || w.env == unsafe { nil } {
+			continue
+		}
+		for bindings in w.current_fn_generic_bindings() {
+			if concrete := bindings[generic_name] {
+				for receiver in type_name_candidates_from_type(mod_name, concrete) {
+					add_unique_string(mut out, receiver)
+				}
+			}
+		}
+	}
+	return out
+}
+
+fn (w &Walker) current_fn_generic_bindings() []map[string]types.Type {
+	if w.env == unsafe { nil } || w.cur_fn_decl.name == '' {
+		return []map[string]types.Type{}
+	}
+	mut out := []map[string]types.Type{}
+	for key, bindings_list in w.env.generic_types {
+		if generic_base_name_from_key(key) != w.cur_fn_decl.name {
+			continue
+		}
+		for bindings in bindings_list {
+			out << bindings
+		}
+	}
+	return out
+}
+
 fn (w &Walker) receiver_candidates_for_expr(expr ast.Expr, mod_name string) []string {
 	mut out := []string{}
 	pos := expr.pos()
@@ -1154,6 +1234,9 @@ fn (w &Walker) receiver_candidates_for_expr(expr ast.Expr, mod_name string) []st
 				}
 			}
 			name := sanitize_receiver_name(expr.name)
+			for type_name in w.current_param_receiver_candidates(expr.name, mod_name) {
+				add_unique_string(mut out, type_name)
+			}
 			add_unique_string(mut out, name)
 			if mod_name != '' && mod_name != 'main' {
 				add_unique_string(mut out, '${mod_name}__${name}')
@@ -1469,6 +1552,7 @@ fn (mut w Walker) walk_expr(expr ast.Expr, mod_name string) {
 			w.walk_expr(expr.expr, mod_name)
 		}
 		ast.InfixExpr {
+			w.mark_infix_operator_method(expr, mod_name)
 			w.walk_expr(expr.lhs, mod_name)
 			w.walk_expr(expr.rhs, mod_name)
 		}

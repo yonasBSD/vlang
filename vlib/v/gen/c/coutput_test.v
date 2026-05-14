@@ -257,6 +257,11 @@ fn test_windows_sharedlive_string_interpolation_in_ternary_does_not_emit_inline_
 
 fn test_windows_tcc_atomic_postfix_uses_interlocked_helpers() {
 	os.chdir(vroot) or {}
+	cc := windows_tcc_ccompiler_for_coutput_test()
+	if cc == '' {
+		eprintln('> skipping ${@FN} since tcc is not available on windows')
+		return
+	}
 	test_source := os.join_path(os.vtmp_dir(), 'coutput_windows_tcc_atomic_postfix.vv')
 	os.write_file(test_source, 'module main
 
@@ -277,12 +282,26 @@ fn main() {
 	defer {
 		os.rm(test_source) or {}
 	}
-	cmd := '${os.quoted_path(vexe)} -o - -os windows -cc x86_64-w64-mingw32-tcc ${os.quoted_path(test_source)}'
+	cmd := '${os.quoted_path(vexe)} -o - -os windows -cc ${cc} ${os.quoted_path(test_source)}'
 	compilation := os.execute(cmd)
 	ensure_compilation_succeeded(compilation, cmd)
 	assert compilation.output.contains('thirdparty/stdatomic/win/atomic.h')
 	assert compilation.output.contains('InterlockedExchangeAdd')
 	assert !compilation.output.contains('__atomic_fetch_add')
+}
+
+fn windows_tcc_ccompiler_for_coutput_test() string {
+	if user_os != 'windows' {
+		return 'x86_64-w64-mingw32-tcc'
+	}
+	bundled_tcc := os.join_path(vroot, 'thirdparty', 'tcc', 'tcc.exe')
+	if os.is_file(bundled_tcc) && os.is_executable(bundled_tcc) {
+		return os.quoted_path(bundled_tcc)
+	}
+	if os.find_abs_path_of_executable('tcc') or { '' } != '' {
+		return 'tcc'
+	}
+	return ''
 }
 
 fn test_no_main_exports_initialize_windows_runtime() {

@@ -562,6 +562,96 @@ fn (mut g Gen) get_struct_name(node ast.StructDecl) string {
 	return node.name
 }
 
+fn (mut g Gen) emit_generic_struct_instance_dependency(type_name string) {
+	if type_name == '' || type_name in primitive_types || type_name.ends_with('*') {
+		return
+	}
+	body_key := 'body_${type_name}'
+	if body_key in g.emitted_types {
+		return
+	}
+	for base_name, instances in g.generic_struct_instances {
+		for inst in instances {
+			if inst.c_name == type_name {
+				g.emit_generic_struct_instance_body_now(base_name, inst)
+				return
+			}
+		}
+	}
+	if decl_info := g.find_struct_decl_info_by_c_name(type_name) {
+		prev_module := g.cur_module
+		g.cur_module = decl_info.mod
+		if g.struct_fields_resolved(decl_info.decl) {
+			g.gen_struct_decl(decl_info.decl)
+		}
+		g.cur_module = prev_module
+	}
+}
+
+fn (mut g Gen) emit_generic_struct_field_dependencies(node ast.StructDecl) {
+	for emb in node.embedded {
+		if g.is_pointer_type(emb) {
+			continue
+		}
+		g.emit_generic_struct_instance_dependency(g.expr_type_to_c(emb))
+	}
+	for field in node.fields {
+		if g.is_pointer_type(field.typ) {
+			continue
+		}
+		g.emit_generic_struct_instance_dependency(g.expr_type_to_c(field.typ))
+	}
+}
+
+fn (mut g Gen) emit_generic_struct_instance_body_now(base_name string, inst GenericStructInstance) {
+	body_key := 'body_${inst.c_name}'
+	if body_key in g.emitted_types {
+		return
+	}
+	struct_node := g.find_generic_struct_node(base_name) or { return }
+	prev_generic_types := g.active_generic_types.clone()
+	prev_generic_c_names := g.active_generic_c_names.clone()
+	g.active_generic_types = inst.bindings.clone()
+	g.active_generic_c_names = inst.c_bindings.clone()
+	defer {
+		g.active_generic_types = prev_generic_types.clone()
+		g.active_generic_c_names = prev_generic_c_names.clone()
+	}
+	g.emit_generic_struct_field_dependencies(struct_node)
+	if body_key in g.emitted_types {
+		return
+	}
+	if !g.struct_fields_resolved(struct_node) {
+		return
+	}
+	keyword := if struct_node.is_union { 'union' } else { 'struct' }
+	if inst.c_name !in g.emitted_types {
+		g.emitted_types[inst.c_name] = true
+		g.sb.writeln('typedef ${keyword} ${inst.c_name} ${inst.c_name};')
+	}
+	g.emitted_types[body_key] = true
+	g.sb.writeln('${keyword} ${inst.c_name} {')
+	for field in struct_node.fields {
+		field_type := g.expr_type_to_c(field.typ)
+		field_name := if field.name.len > 0 { field.name } else { 'value' }
+		g.sb.writeln('\t${field_type} ${field_name};')
+		g.struct_field_types['${inst.c_name}.${field_name}'] = field_type
+	}
+	g.struct_field_lookup_cache = map[string]string{}
+	g.struct_field_lookup_miss = map[string]bool{}
+	if struct_node.fields.len == 0 {
+		g.sb.writeln('\tu8 _dummy;')
+	}
+	g.sb.writeln('};')
+	inst_str_fn := '${inst.c_name}__str'
+	if inst_str_fn !in g.fn_return_types {
+		inst_label := '${inst.c_name}{}'
+		g.sb.writeln('#define ${inst.c_name}__str(v) ((string){.str = "${inst_label}", .len = ${inst_label.len}, .is_lit = 1})')
+		g.sb.writeln('#define ${inst.c_name}_str(v) ${inst.c_name}__str(v)')
+	}
+	g.sb.writeln('')
+}
+
 fn (mut g Gen) gen_struct_decl(node ast.StructDecl) {
 	// Skip C extern struct declarations
 	if node.language == .c {
@@ -605,6 +695,7 @@ fn (mut g Gen) gen_struct_decl(node ast.StructDecl) {
 	if body_key in g.emitted_types || body_key in g.pending_late_body_keys {
 		return
 	}
+	g.emit_generic_struct_field_dependencies(node)
 	// For generic structs with active bindings, verify that all field types
 	// are already emitted. This prevents the last-resort pass from emitting
 	// a generic struct body before its concrete field types are defined.
@@ -809,12 +900,19 @@ fn (mut g Gen) gen_struct_decl(node ast.StructDecl) {
 			if inst_body_key in g.emitted_types || inst_body_key in g.pending_late_body_keys {
 				continue
 			}
-			g.emitted_types[inst_body_key] = true
 			// Set active generic types to this instantiation's bindings
 			prev_active := g.active_generic_types.clone()
 			prev_active_c_names := g.active_generic_c_names.clone()
 			g.active_generic_types = inst.bindings.clone()
 			g.active_generic_c_names = inst.c_bindings.clone()
+			g.emit_generic_struct_field_dependencies(node)
+			if !g.struct_fields_resolved(node) {
+				g.active_generic_types = prev_active.clone()
+				g.active_generic_c_names = prev_active_c_names.clone()
+				g.emit_late_generic_struct(name, inst)
+				continue
+			}
+			g.emitted_types[inst_body_key] = true
 			g.sb.writeln('${keyword} ${inst.c_name} {')
 			for field in node.fields {
 				field_type := g.expr_type_to_c(field.typ)

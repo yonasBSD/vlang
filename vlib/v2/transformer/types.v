@@ -3726,7 +3726,7 @@ fn (t &Transformer) type_constructor_name(typ types.Type) string {
 
 // type_to_c_name converts a types.Type to its C type name string
 fn (t &Transformer) type_to_c_name(typ types.Type) string {
-	if types.type_name(typ) == '' {
+	if !is_type_valid(typ) || types.type_name(typ) == '' {
 		return ''
 	}
 	match typ {
@@ -3862,6 +3862,9 @@ fn (t &Transformer) type_to_c_name(typ types.Type) string {
 // to their underlying primitive types. This is used for array__contains_* function naming
 // where we want ValueID -> int, BlockID -> int, etc.
 fn (t &Transformer) type_to_c_name_resolve_alias(typ types.Type) string {
+	if !is_type_valid(typ) {
+		return ''
+	}
 	// If it's an alias, try to resolve to underlying type
 	if typ is types.Alias {
 		primitives := ['int', 'i8', 'i16', 'i32', 'i64', 'u8', 'u16', 'u32', 'u64', 'bool', 'f32',

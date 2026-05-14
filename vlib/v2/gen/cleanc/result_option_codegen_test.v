@@ -127,6 +127,7 @@ fn copy_bag(b Bag) Bag {
 	assert csrc.contains('builtin__Option_string__clone')
 	assert csrc.contains('.state == 0')
 	assert !csrc.contains('if (s)')
+	assert !csrc.contains('string _val = builtin__Option_string__clone')
 }
 
 fn test_generate_c_wraps_struct_field_option_value() {
@@ -148,6 +149,31 @@ fn make(r &Ref) Holder {
 	assert csrc.contains('_option_Refptr item;')
 	assert csrc.contains('_option_Refptr _opt = (_option_Refptr){ .state = 2 }; Ref* _val = r; _option_ok(&_val, (_option*)&_opt, sizeof(_val)); _opt;')
 	assert !csrc.contains('.item = r')
+}
+
+fn test_generate_c_interface_cast_strips_pointer_for_method_symbol() {
+	csrc := generate_result_option_c_for_test('
+interface Handle {
+	len() int
+}
+
+struct File {}
+
+fn (mut f File) len() int {
+	_ = f
+	return 1
+}
+
+fn consume(h &Handle) int {
+	return h.len()
+}
+
+fn demo(mut file File) int {
+	return consume(&file)
+}
+')
+	assert csrc.contains('.len = (int (*)(void*))File__len')
+	assert !csrc.contains('File*__len')
 }
 
 fn test_generate_c_initializes_omitted_option_struct_fields_to_none() {
@@ -275,6 +301,33 @@ fn main() {
 ')
 	assert !csrc.contains('string ErrorLike__msg(ErrorLike err)')
 	assert !csrc.contains('Inner__str((err).inner)')
+}
+
+fn test_generate_c_emits_used_struct_operator_method_body_with_markused() {
+	csrc := generate_markused_c_for_test('
+struct Stats {
+	n int
+}
+
+fn (left Stats) + (right Stats) Stats {
+	return Stats{
+		n: left.n + right.n
+	}
+}
+
+fn test_stats_plus() {
+	left := Stats{
+		n: 1
+	}
+	right := Stats{
+		n: 2
+	}
+	sum := left + right
+	assert sum.n == 3
+}
+')
+	assert csrc.contains('Stats Stats__plus(Stats left, Stats right)')
+	assert csrc.count('Stats__plus(') >= 2
 }
 
 fn test_generate_c_borrows_option_field_unwrap_payload_without_temp() {
@@ -455,6 +508,52 @@ fn build_no_color[W](wtr W) Summary[NoColor[W]] {
 ')
 	assert !csrc.contains('struct CounterWriter {\n\tNoColor wtr;')
 	assert !csrc.contains('struct Summary {\n\tCounterWriter wtr;')
+}
+
+fn test_generate_c_orders_nested_generic_struct_dependencies() {
+	csrc := generate_result_option_c_for_test('
+struct PlainWriter {}
+
+struct NoColor[W] {
+mut:
+	wtr W
+}
+
+struct CounterWriter[W] {
+mut:
+	wtr W
+}
+
+struct Direct[W] {
+mut:
+	wtr CounterWriter[W]
+}
+
+struct JSON[W] {
+mut:
+	wtr CounterWriter[NoColor[W]]
+}
+
+fn build_direct[W](wtr W) Direct[W] {
+	_ = wtr
+	return Direct[W]{}
+}
+
+fn build[W](wtr W) JSON[W] {
+	_ = wtr
+	return JSON[W]{}
+}
+
+fn demo() {
+	_ := build_direct(PlainWriter{})
+	_ := build(PlainWriter{})
+}
+')
+	dep_pos := csrc.index('struct CounterWriter_T_NoColor {') or {
+		panic('missing concrete nested generic struct body')
+	}
+	user_pos := csrc.index('struct JSON {') or { panic('missing generic user struct body') }
+	assert dep_pos < user_pos
 }
 
 fn test_generate_c_skips_interface_clone_for_incomplete_generic_implementor() {

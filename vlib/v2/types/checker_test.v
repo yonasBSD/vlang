@@ -95,6 +95,206 @@ fn test_basic_literal_string() {
 	assert has_type(env, 'string'), 'string literal should have string type'
 }
 
+fn test_chained_string_split_filter_uses_array_receiver_type_for_it() {
+	env := check_code('
+fn main() {
+	lhs := "a b"
+	tokens := lhs.split(" ").filter(it.len > 0)
+	_ = tokens
+}
+')
+	assert has_type_matching(env, fn (t Type) bool {
+		return t is Array && t.elem_type.name() == 'string'
+	}), 'split().filter(it...) should type as []string'
+}
+
+fn test_selector_array_map_string_interpolation_uses_receiver_type_for_it() {
+	code :=
+		'
+struct CallFrame {
+	module_name string
+	fn_name string
+}
+
+struct Eval {
+	call_stack []CallFrame
+}
+
+fn (e &Eval) trace() string {
+	mapped := e.call_stack.map("' +
+		'$' + '{it.module_name}.' + '$' + '{it.fn_name}")
+	_ = mapped
+	return ""
+}
+'
+	env := check_code(code)
+	assert has_type_matching(env, fn (t Type) bool {
+		return t is Array && t.elem_type.name() == 'string'
+	}), 'selector array map interpolation should type as []string'
+}
+
+fn test_struct_init_prefers_field_when_method_has_same_name() {
+	env := check_code('
+struct Time {
+	unix i64
+}
+
+fn (t Time) unix() i64 {
+	return t.unix
+}
+
+fn main() {
+	t := Time{
+		unix: 1
+	}
+	_ = t
+}
+')
+	assert has_type(env, 'i64'), 'struct init should use the unix field, not Time.unix()'
+}
+
+fn test_struct_update_prefers_field_when_method_has_same_name() {
+	env := check_code('
+struct Time {
+	unix i64
+}
+
+fn (t Time) unix() i64 {
+	return t.unix
+}
+
+fn calc(t Time) i64 {
+	return t.unix
+}
+
+fn main() {
+	base := Time{
+		unix: 1
+	}
+	t := Time{
+		...base
+		unix: calc(base)
+	}
+	_ = t
+}
+')
+	assert has_type(env, 'i64'), 'struct update should use the unix field, not Time.unix()'
+}
+
+fn test_unsafe_expr_returns_last_expression_type() {
+	env := check_code('
+struct FileSet {}
+
+fn (mut fs FileSet) file() int {
+	return 1
+}
+
+struct Holder {
+	file_set &FileSet
+}
+
+fn main() {
+	h := &Holder{
+		file_set: &FileSet{}
+	}
+	mut fs := unsafe { h.file_set }
+	x := fs.file()
+	_ = x
+}
+')
+	assert has_type(env, 'int'), 'unsafe block should return the last expression type'
+}
+
+fn test_if_branch_trailing_expr_is_not_rechecked() {
+	env := check_code('
+struct Builder {}
+
+fn (mut b Builder) writeln(s string) {}
+
+struct Gen {
+	link_builtin bool
+mut:
+	sb Builder
+}
+
+fn (mut g Gen) helper() {}
+
+fn (mut g Gen) gen() {
+	if !g.link_builtin {
+		g.helper()
+		g.sb.writeln("")
+	}
+}
+')
+	assert has_type(env, 'Builder'), 'if branch trailing method call should type-check once'
+}
+
+fn test_if_guard_branch_trailing_expr_is_not_rechecked() {
+	env := check_code('
+struct Builder {}
+
+fn (mut b Builder) writeln(s string) {}
+
+struct Embedded {
+	wrapper_base string
+	owner string
+}
+
+struct Gen {
+	fn_return_types []string
+mut:
+	sb Builder
+}
+
+fn (mut g Gen) helper(base string) ?Embedded {
+	if base == "" {
+		return none
+	}
+	return Embedded{}
+}
+
+fn (mut g Gen) gen(base string) {
+	msg_fn := base + "__msg"
+	if msg_fn in g.fn_return_types {
+		g.sb.writeln("")
+	} else if embedded := g.helper(base) {
+		g.sb.writeln(embedded.wrapper_base + "__msg(" + embedded.owner + ")")
+	} else {
+		g.sb.writeln("")
+	}
+}
+')
+	assert has_type(env, 'Builder'), 'if guard branch trailing method call should type-check once'
+}
+
+fn test_or_block_with_return_keeps_receiver_type() {
+	code :=
+		'
+import strings
+import v2.types
+
+struct Gen {
+	active_generic_types map[string]types.Type
+mut:
+	sb strings.Builder
+}
+
+fn (mut g Gen) write_indent() {}
+
+fn (mut g Gen) gen(type_name string) {
+	concrete := g.active_generic_types[type_name] or {
+		g.write_indent()
+		g.sb.writeln("/* [TODO] ComptimeFor unknown type ' +
+		'$' + '{type_name} */")
+		return
+	}
+	_ = concrete
+}
+'
+	env := check_code(code)
+	assert has_type(env, 'strings__Builder'), 'or block should keep strings.Builder receiver fields typed before return'
+}
+
 fn test_os_execute_warning_detection() {
 	os_execute_selector := ast.Expr(ast.SelectorExpr{
 		lhs: ast.Ident{

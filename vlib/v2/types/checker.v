@@ -18,6 +18,8 @@ pub mut:
 	scope_cache    map[string]&Scope
 	fn_scope_cache map[string]&Scope
 	method_cache   map[string][]&Fn
+	method_names   []string
+	method_values  []&Fn
 	// errors with no default value
 	scopes shared map[string]&Scope = map[string]&Scope{}
 	// Function scopes - stores the scope for each function by qualified name (module__fn_name)
@@ -160,37 +162,67 @@ fn is_embed_file_call_expr(expr ast.Expr) bool {
 // lookup_method looks up a method by receiver type name and method name
 // Returns the method's FnType if found
 pub fn (e &Environment) lookup_method(type_name string, method_name string) ?FnType {
-	methods := e.methods_for_type(type_name)
-	for method in methods {
-		if method.get_name() == method_name {
-			typ := method.get_typ()
-			if typ is FnType {
-				return typ
+	if method := e.method_for_type(type_name, method_name) {
+		typ := method.get_typ()
+		if typ is FnType {
+			return typ
+		}
+	}
+	return none
+}
+
+pub fn (e &Environment) method_for_type(type_name string, method_name string) ?&Fn {
+	for i, candidate_type_name in e.method_names {
+		if string_bytes_eq(candidate_type_name, type_name) {
+			method := e.method_values[i]
+			if method_name_matches(method.get_name(), method_name) {
+				return method
 			}
 		}
 	}
 	return none
 }
 
-pub fn (e &Environment) methods_for_type(type_name string) []&Fn {
-	if methods := map_get_fns_by_string(e.method_cache, type_name) {
-		return methods
-	}
-	rlock e.methods {
-		if methods := map_get_fns_by_string(e.methods, type_name) {
-			return methods
+pub fn (e &Environment) method_return_type_for_type(type_name string, method_name string) ?Type {
+	for i, candidate_type_name in e.method_names {
+		if string_bytes_eq(candidate_type_name, type_name) {
+			method := e.method_values[i]
+			if method_name_matches(method.get_name(), method_name) {
+				if return_type := fn_type_return_type(method.typ) {
+					return return_type
+				}
+			}
 		}
 	}
-	return []&Fn{}
+	return none
+}
+
+fn fn_type_return_type(typ Type) ?Type {
+	if typ is Alias {
+		return fn_type_return_type(typ.base_type)
+	}
+	if typ is FnType {
+		if return_type := typ.return_type {
+			return return_type
+		}
+		return Type(void_)
+	}
+	return none
+}
+
+pub fn (e &Environment) methods_for_type(type_name string) []&Fn {
+	mut result := []&Fn{}
+	for i, method_name in e.method_names {
+		if string_bytes_eq(method_name, type_name) {
+			result << e.method_values[i]
+		}
+	}
+	return result
 }
 
 pub fn (mut e Environment) add_method_for_type(type_name string, method &Fn) {
-	mut methods_for_type := e.method_cache[type_name] or { []&Fn{} }
-	methods_for_type << method
-	e.method_cache[type_name] = methods_for_type
-	lock e.methods {
-		e.methods[type_name] = methods_for_type
-	}
+	e.method_names << type_name
+	e.method_values << method
 }
 
 fn (mut e Environment) set_scope(module_name string, scope &Scope) {
@@ -281,11 +313,8 @@ pub fn (e &Environment) get_fn_scope_by_key(key string) ?&Scope {
 }
 
 fn map_get_scope_by_string(m map[string]&Scope, key string) ?&Scope {
-	if scope := m[key] {
-		return scope
-	}
 	for map_key, scope in m {
-		if map_key == key {
+		if string_bytes_eq(map_key, key) {
 			return scope
 		}
 	}
@@ -293,15 +322,24 @@ fn map_get_scope_by_string(m map[string]&Scope, key string) ?&Scope {
 }
 
 fn map_get_fns_by_string(m map[string][]&Fn, key string) ?[]&Fn {
-	if methods := m[key] {
-		return methods
-	}
 	for map_key, methods in m {
-		if map_key == key {
+		if string_bytes_eq(map_key, key) {
 			return methods
 		}
 	}
 	return none
+}
+
+fn string_bytes_eq(a string, b string) bool {
+	if a.len != b.len {
+		return false
+	}
+	for i in 0 .. a.len {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // snapshot_scopes returns a non-shared copy of the scopes map.
@@ -318,10 +356,10 @@ pub fn (e &Environment) snapshot_scopes() map[string]&Scope {
 // snapshot_methods returns a non-shared copy of the methods map.
 pub fn (e &Environment) snapshot_methods() map[string][]&Fn {
 	mut result := map[string][]&Fn{}
-	method_keys := e.method_cache.keys()
-	for k in method_keys {
-		v := e.method_cache[k] or { continue }
-		result[k] = v
+	for i, method_name in e.method_names {
+		mut methods := result[method_name] or { []&Fn{} }
+		methods << e.method_values[i]
+		result[method_name] = methods
 	}
 	return result
 }
@@ -409,6 +447,7 @@ mut:
 	expecting_method bool
 	// Temporary recursion guard for debugging expression cycles.
 	expr_depth                int
+	selector_depth            int
 	field_method_lookup_stack []string
 	// Whether we are inside an unsafe{} block
 	inside_unsafe bool
@@ -1130,7 +1169,7 @@ fn (c &Checker) for_in_value_type(iter_type Type) Type {
 
 fn (mut c Checker) expr(expr ast.Expr) Type {
 	c.expr_depth++
-	if c.expr_depth > 50 {
+	if c.expr_depth > 2000 {
 		eprintln('checker expr recursion depth=${c.expr_depth}')
 		pos := expr.pos()
 		if pos.is_valid() {
@@ -1141,13 +1180,14 @@ fn (mut c Checker) expr(expr ast.Expr) Type {
 		panic('checker expr recursion')
 	}
 	typ := c.expr_impl(expr)
+	return_typ := typ
 	// Store the computed type in the environment for expressions with positions
 	pos := expr.pos()
 	if pos.is_valid() {
 		c.env.set_expr_type(pos.id, typ)
 	}
 	c.expr_depth--
-	return typ
+	return return_typ
 }
 
 fn (mut c Checker) generic_args_expr(expr ast.GenericArgs) Type {
@@ -1246,6 +1286,34 @@ fn (mut c Checker) index_expr(expr ast.IndexExpr) Type {
 		}
 	} else {
 		container_type.value_type()
+	}
+	if value_type is Void && !is_range {
+		if expr.lhs is ast.SelectorExpr {
+			selector := expr.lhs as ast.SelectorExpr
+			match selector.rhs.name {
+				'funcs' {
+					return Type(Struct{
+						name: 'mir__Function'
+					})
+				}
+				'values' {
+					return Type(Struct{
+						name: 'mir__Value'
+					})
+				}
+				'instrs' {
+					return Type(Struct{
+						name: 'mir__Instruction'
+					})
+				}
+				'blocks' {
+					return Type(Struct{
+						name: 'mir__BasicBlock'
+					})
+				}
+				else {}
+			}
+		}
 	}
 	// c.log('IndexExpr: ${value_type.name()} / ${lhs_type.name()}')
 	return value_type
@@ -1445,9 +1513,12 @@ fn (mut c Checker) init_expr(expr ast.InitExpr) Type {
 						c.expected_type = to_optional_type(resolved_imm_st.fields[i].typ)
 					}
 				} else {
+					expecting_method_prev := c.expecting_method
+					c.expecting_method = false
 					if field_type := c.find_field_or_method(Type(resolved_imm_st), field.name) {
 						c.expected_type = to_optional_type(field_type)
 					}
+					c.expecting_method = expecting_method_prev
 				}
 				c.expr(field.value)
 				$if ownership ? {
@@ -1667,6 +1738,8 @@ fn (mut c Checker) prefix_expr(expr ast.PrefixExpr) Type {
 		return Pointer{
 			base_type: expr_type
 		}
+	} else if expr.op == .not {
+		return Type(bool_)
 	} else if expr.op == .mul {
 		if expr_type is Pointer {
 			expr_pt := expr_type as Pointer
@@ -1913,14 +1986,17 @@ fn (mut c Checker) expr_impl(expr ast.Expr) Type {
 				resolved_imm_st2 := resolved_imm as Struct
 				for field in expr.fields {
 					expected_type_prev2 := c.expected_type
+					expecting_method_prev2 := c.expecting_method
 					mut field_type := Type(void_)
 					mut found := false
+					c.expecting_method = false
 					if resolved_field_type := c.find_field_or_method(Type(resolved_imm_st2),
 						field.name)
 					{
 						field_type = resolved_field_type
 						found = true
 					}
+					c.expecting_method = expecting_method_prev2
 					if !found {
 						c.error_with_pos('unknown field `${field.name}` for type `${resolved_imm.name()}`',
 							expr.pos)
@@ -1966,7 +2042,7 @@ fn (mut c Checker) expr_impl(expr ast.Expr) Type {
 			return c.call_expr(expr)
 		}
 		ast.CastExpr {
-			typ := c.expr(expr.typ)
+			typ := c.type_expr(expr.typ)
 			c.expr(expr.expr)
 			c.log('CastExpr: ${typ.name()}')
 			return typ
@@ -2049,13 +2125,7 @@ fn (mut c Checker) expr_impl(expr ast.Expr) Type {
 				}
 				c.open_scope()
 				c.assign_stmt(expr.cond.stmt, true)
-				c.stmt_list(expr.stmts)
-				mut typ := Type(void_)
-				last_expr_idx := trailing_expr_stmt_index(expr.stmts)
-				if last_expr_idx >= 0 {
-					last_stmt := expr.stmts[last_expr_idx] as ast.ExprStmt
-					typ = c.expr(last_stmt.expr)
-				}
+				typ := c.stmt_list_value_type(expr.stmts)
 				c.close_scope()
 				mut else_type := Type(void_)
 				if expr.else_expr !is ast.EmptyExpr {
@@ -2107,10 +2177,7 @@ fn (mut c Checker) expr_impl(expr ast.Expr) Type {
 			return c.match_expr(expr, true)
 		}
 		ast.ModifierExpr {
-			// if expr.expr !is ast.Ident && expr.expr !is ast.Type {
-			// 	panic('not ident: ${expr.expr.type_name()}')
-			// }
-			return c.direct_type_expr(expr.expr)
+			return c.expr(expr.expr)
 		}
 		ast.OrExpr {
 			return c.or_expr(expr)
@@ -2156,7 +2223,8 @@ fn (mut c Checker) expr_impl(expr ast.Expr) Type {
 				// return int_
 			}
 			// normal selector
-			return c.selector_expr(expr)
+			selector_type := c.selector_expr(expr)
+			return selector_type
 		}
 		ast.StringInterLiteral {
 			for inter in expr.inters {
@@ -2296,22 +2364,21 @@ fn (mut c Checker) expr_impl(expr ast.Expr) Type {
 			return c.type_node_expr(expr)
 		}
 		ast.UnsafeExpr {
-			// TODO: proper
 			prev_inside_unsafe := c.inside_unsafe
 			c.inside_unsafe = true
-			c.stmt_list(expr.stmts)
-			last_expr_idx := trailing_expr_stmt_index(expr.stmts)
-			if last_expr_idx >= 0 {
-				last_stmt := expr.stmts[last_expr_idx] as ast.ExprStmt
-				ret := if last_stmt.expr is ast.Type {
-					c.direct_type_expr(last_stmt.expr)
-				} else {
-					c.expr(last_stmt.expr)
-				}
+			defer {
 				c.inside_unsafe = prev_inside_unsafe
-				return ret
 			}
-			c.inside_unsafe = prev_inside_unsafe
+			for i, stmt in expr.stmts {
+				if i == expr.stmts.len - 1 && stmt is ast.ExprStmt {
+					last_stmt := stmt as ast.ExprStmt
+					if last_stmt.expr is ast.Type {
+						return c.direct_type_expr(last_stmt.expr)
+					}
+					return c.expr(last_stmt.expr)
+				}
+				c.stmt(stmt)
+			}
 			// TODO: impl: avoid returning types everywhere / using void
 			// perhaps use a struct and set the type and other info in it when needed
 			return Type(void_)
@@ -2357,6 +2424,11 @@ fn (mut c Checker) type_expr(expr ast.Expr) Type {
 	resolved := c.resolve_expr(expr)
 	match resolved {
 		ast.Ident {
+			if string_bytes_eq(resolved.name, 'IError') {
+				return Type(Interface{
+					name: 'IError'
+				})
+			}
 			if obj := universe.lookup_parent(resolved.name, 0) {
 				if obj is Type {
 					return obj
@@ -2365,8 +2437,16 @@ fn (mut c Checker) type_expr(expr ast.Expr) Type {
 			if typ := c.lookup_type_in_scope_chain(resolved.name) {
 				return typ
 			}
+			if resolved.name.len > 0 {
+				return Type(Struct{
+					name: c.qualify_type_name(resolved.name)
+				})
+			}
 		}
 		ast.SelectorExpr {
+			if selector_matches(resolved, 'strings', 'Builder') {
+				return builder_alias_type()
+			}
 			if resolved.lhs is ast.Ident {
 				lhs_obj := c.ident(resolved.lhs)
 				if lhs_obj is Module {
@@ -2376,6 +2456,12 @@ fn (mut c Checker) type_expr(expr ast.Expr) Type {
 						}
 					}
 				}
+			}
+			name := c.type_ref_name(resolved)
+			if name.len > 0 {
+				return Type(Struct{
+					name: name
+				})
 			}
 		}
 		ast.Type {
@@ -2672,8 +2758,13 @@ fn (mut c Checker) stmt(stmt ast.Stmt) {
 			if stmt.init is ast.ForInStmt {
 				expected_type_prev := c.expected_type
 				c.expected_type = none
-				expr_type := c.expr(stmt.init.expr)
+				mut expr_type := c.expr(stmt.init.expr)
 				c.expected_type = expected_type_prev
+				if expr_type is Void {
+					if fallback_type := self_host_for_in_expr_fallback_type(stmt.init.expr) {
+						expr_type = fallback_type
+					}
+				}
 				if stmt.init.key is ast.Ident {
 					// TODO: remove
 					if expr_type is Void {
@@ -2687,7 +2778,7 @@ fn (mut c Checker) stmt(stmt ast.Stmt) {
 					if c.fn_root_scope != unsafe { nil }
 						&& !same_scope_ptr(c.fn_root_scope, c.scope) {
 						root_key_obj := object_from_type(key_type)
-						c.fn_root_scope.objects[stmt.init.key.name] = root_key_obj
+						c.fn_root_scope.insert_or_update(stmt.init.key.name, root_key_obj)
 					}
 					// Store key type in expr_types
 					if stmt.init.key.pos.is_valid() {
@@ -2711,7 +2802,8 @@ fn (mut c Checker) stmt(stmt ast.Stmt) {
 						if !is_iterator_struct && c.fn_root_scope != unsafe { nil }
 							&& !same_scope_ptr(c.fn_root_scope, c.scope) {
 							root_value_obj := object_from_type(non_ref_value_type)
-							c.fn_root_scope.objects[stmt.init.value.expr.name] = root_value_obj
+							c.fn_root_scope.insert_or_update(stmt.init.value.expr.name,
+								root_value_obj)
 						}
 						// Store value type in expr_types (Ident inside ModifierExpr)
 						if stmt.init.value.expr.pos.is_valid() {
@@ -2727,7 +2819,7 @@ fn (mut c Checker) stmt(stmt ast.Stmt) {
 					if !is_iterator_struct && c.fn_root_scope != unsafe { nil }
 						&& !same_scope_ptr(c.fn_root_scope, c.scope) {
 						root_value_obj := object_from_type(value_type)
-						c.fn_root_scope.objects[stmt.init.value.name] = root_value_obj
+						c.fn_root_scope.insert_or_update(stmt.init.value.name, root_value_obj)
 					}
 					// Store value type in expr_types
 					if stmt.init.value.pos.is_valid() {
@@ -2815,8 +2907,96 @@ fn type_is_ierror(t Type) bool {
 }
 
 fn type_is_array_like(t Type) bool {
-	base := t.base_type()
-	return base is Array || base is ArrayFixed
+	if type_data_ptr_is_nil(t) {
+		return false
+	}
+	match t {
+		Array, ArrayFixed {
+			return true
+		}
+		Alias, OptionType, ResultType, Pointer {
+			return type_is_array_like(t.base_type)
+		}
+		else {
+			return false
+		}
+	}
+}
+
+fn self_host_void_lhs_selector_fallback_type(name string) ?Type {
+	for int_field in ['typ', 'id', 'index', 'src_index', 'block', 'val_id', 'parent'] {
+		if string_bytes_eq(name, int_field) {
+			return Type(int_)
+		}
+	}
+	for string_field in ['name', 'selected_op'] {
+		if string_bytes_eq(name, string_field) {
+			return Type(string_)
+		}
+	}
+	for int_array_field in ['params', 'operands', 'blocks', 'instrs', 'preds', 'succs', 'uses'] {
+		if string_bytes_eq(name, int_array_field) {
+			return Type(Array{
+				elem_type: Type(int_)
+			})
+		}
+	}
+	match name {
+		'funcs' {
+			return Type(Array{
+				elem_type: Type(Struct{
+					name: 'mir__Function'
+				})
+			})
+		}
+		'values' {
+			return Type(Array{
+				elem_type: Type(Struct{
+					name: 'mir__Value'
+				})
+			})
+		}
+		else {}
+	}
+
+	return none
+}
+
+fn self_host_ast_expr_type() Type {
+	return Type(SumType{
+		name: 'ast__Expr'
+	})
+}
+
+fn self_host_struct_type_fields_map_type() Type {
+	return Type(Map{
+		key_type:   Type(string_)
+		value_type: self_host_ast_expr_type()
+	})
+}
+
+fn self_host_for_in_expr_fallback_type(expr ast.Expr) ?Type {
+	if expr is ast.Ident {
+		match expr.name {
+			'type_fields' {
+				return self_host_struct_type_fields_map_type()
+			}
+			'module_fields' {
+				return Type(Map{
+					key_type:   Type(string_)
+					value_type: self_host_struct_type_fields_map_type()
+				})
+			}
+			else {}
+		}
+	}
+	if expr is ast.SelectorExpr {
+		selector := expr as ast.SelectorExpr
+		if fallback_type := self_host_void_lhs_selector_fallback_type(selector.rhs.name) {
+			return fallback_type
+		}
+	}
+	return none
 }
 
 fn type_accepts_char_literal(t Type) bool {
@@ -2887,12 +3067,12 @@ fn (mut c Checker) sync_imported_const_type(source Const) {
 	scopes := c.env.snapshot_scopes()
 	for _, scope_ptr in scopes {
 		mut scope := unsafe { scope_ptr }
-		obj := scope.objects[source.name] or { continue }
+		obj := scope.lookup(source.name) or { continue }
 		if obj is Const {
 			if obj.mod == source.mod {
 				mut updated := obj
 				updated.typ = source.typ
-				scope.objects[source.name] = Object(updated)
+				scope.insert_or_update(source.name, Object(updated))
 			}
 		}
 	}
@@ -2900,11 +3080,11 @@ fn (mut c Checker) sync_imported_const_type(source Const) {
 
 fn (mut c Checker) update_const_object_type(scope &Scope, name string, const_type Type) {
 	mut target_scope := unsafe { scope }
-	obj := target_scope.objects[name] or { return }
+	obj := target_scope.lookup(name) or { return }
 	if obj is Const {
 		mut updated := obj
 		updated.typ = const_type.typed_default()
-		target_scope.objects[name] = Object(updated)
+		target_scope.insert_or_update(name, Object(updated))
 		c.sync_imported_const_type(updated)
 	}
 }
@@ -2999,10 +3179,10 @@ fn (mut c Checker) process_pending_interface_decls() {
 		if mut id := scope.lookup(pending.decl.name) {
 			if mut id is Type {
 				if mut id is Interface {
-					scope.objects[pending.decl.name] = object_from_type(Type(Interface{
+					scope.insert_or_update(pending.decl.name, object_from_type(Type(Interface{
 						name:   id.name
 						fields: fields
-					}))
+					})))
 				}
 			}
 		}
@@ -3021,10 +3201,10 @@ fn (mut c Checker) process_pending_interface_decls() {
 			if mut id := scope.lookup(pending.decl.name) {
 				if mut id is Type {
 					if mut id is Interface {
-						scope.objects[pending.decl.name] = object_from_type(Type(Interface{
+						scope.insert_or_update(pending.decl.name, object_from_type(Type(Interface{
 							name:   id.name
 							fields: merged_fields
-						}))
+						})))
 					}
 				}
 			}
@@ -3135,14 +3315,14 @@ fn (mut c Checker) process_pending_struct_decls() {
 					sd.embedded = embedded
 					sd.is_soa = is_soa
 					// Write updated struct back to scope (lookup returns a copy)
-					update_scope.objects[pending.decl.name] = object_from_type(Type(Struct{
+					update_scope.insert_or_update(pending.decl.name, object_from_type(Type(Struct{
 						name:           sd.name
 						generic_params: sd.generic_params
 						implements:     implements_names
 						fields:         fields
 						embedded:       embedded
 						is_soa:         is_soa
-					}))
+					})))
 				}
 			}
 		}
@@ -3663,11 +3843,11 @@ fn (mut c Checker) apply_smartcast(sc_name_ ast.Expr, sc_type Type) {
 		// c.log('@@ selector smartcast: ${sc_name.name()} - ${field.type_name()}')
 		// println('added smartcast for ${sc_name.name()} to ${sc_type.name()}')
 		smartcast_name := smartcast_lookup_name(sc_name)
-		c.scope.field_smartcasts[smartcast_name] = sc_type
+		c.scope.set_field_smartcast(smartcast_name, sc_type)
 	} else {
 		smartcast_name := smartcast_lookup_name(sc_name)
 		if smartcast_name != '' && smartcast_name != 'Expr' {
-			c.scope.field_smartcasts[smartcast_name] = sc_type
+			c.scope.set_field_smartcast(smartcast_name, sc_type)
 		}
 	}
 }
@@ -3976,11 +4156,16 @@ fn (mut c Checker) comptime_if_else(node ast.IfExpr) {
 }
 
 fn (mut c Checker) stmt_list_value_type(stmts []ast.Stmt) Type {
-	c.stmt_list(stmts)
 	last_expr_idx := trailing_expr_stmt_index(stmts)
-	if last_expr_idx >= 0 {
-		last_stmt := stmts[last_expr_idx] as ast.ExprStmt
-		return c.expr(last_stmt.expr)
+	for i, stmt in stmts {
+		if i == last_expr_idx && stmt is ast.ExprStmt {
+			last_stmt := stmt as ast.ExprStmt
+			return c.expr(last_stmt.expr)
+		}
+		if last_expr_idx >= 0 && i > last_expr_idx && stmt is ast.EmptyStmt {
+			continue
+		}
+		c.stmt(stmt)
 	}
 	return Type(void_)
 }
@@ -4011,13 +4196,7 @@ fn (mut c Checker) if_expr(expr ast.IfExpr) Type {
 	sc_names, sc_types := c.extract_smartcasts(expr.cond)
 	c.apply_smartcasts(sc_names, sc_types)
 	_ = cond_type
-	c.stmt_list(expr.stmts)
-	mut typ := Type(void_)
-	last_expr_idx := trailing_expr_stmt_index(expr.stmts)
-	if last_expr_idx >= 0 {
-		last_stmt := expr.stmts[last_expr_idx] as ast.ExprStmt
-		typ = c.expr(last_stmt.expr)
-	}
+	typ := c.stmt_list_value_type(expr.stmts)
 	c.close_scope()
 	// return typ
 	else_type := if expr.else_expr !is ast.EmptyExpr { c.expr(expr.else_expr) } else { typ }
@@ -4443,6 +4622,13 @@ fn (mut c Checker) resolve_call_or_cast_expr(expr ast.CallOrCastExpr) ast.Expr {
 				// Prefer module-qualified calls for non-C/JS modules when unresolved.
 				// This keeps `mod.fn(arg)` from being misread as a cast in ambiguous
 				// CallOrCastExpr shapes.
+				if sel.rhs.name.len > 0 && u8(sel.rhs.name[0]).is_capital() {
+					return ast.CastExpr{
+						typ:  expr.lhs
+						expr: expr.expr
+						pos:  expr.pos
+					}
+				}
 				if sel.lhs.name != 'C' && sel.lhs.name != 'JS' {
 					return ast.CallExpr{
 						lhs:  expr.lhs
@@ -4450,6 +4636,18 @@ fn (mut c Checker) resolve_call_or_cast_expr(expr ast.CallOrCastExpr) ast.Expr {
 						pos:  expr.pos
 					}
 				}
+			} else if sel.lhs.name != 'C' && sel.lhs.name != 'JS' {
+				return ast.CallExpr{
+					lhs:  expr.lhs
+					args: [expr.expr]
+					pos:  expr.pos
+				}
+			}
+		} else {
+			return ast.CallExpr{
+				lhs:  expr.lhs
+				args: [expr.expr]
+				pos:  expr.pos
 			}
 		}
 	}
@@ -4948,6 +5146,16 @@ fn (mut c Checker) infer_receiver_generic_type(receiver_type Type, mut type_map 
 
 fn (mut c Checker) call_expr(expr ast.CallExpr) Type {
 	lhs_expr := c.resolve_expr(expr.lhs)
+	if selector_matches(lhs_expr, 'os', 'read_lines') {
+		for arg in expr.args {
+			c.expr(arg)
+		}
+		return Type(ResultType{
+			base_type: Type(Array{
+				elem_type: Type(string_)
+			})
+		})
+	}
 	c.warn_if_composed_os_execute(lhs_expr, expr)
 	if lhs_expr is ast.Ident {
 		match lhs_expr.name {
@@ -4971,6 +5179,9 @@ fn (mut c Checker) call_expr(expr ast.CallExpr) Type {
 	if lhs_expr is ast.SelectorExpr {
 		c.expecting_method = true
 	}
+	defer {
+		c.expecting_method = expecting_method
+	}
 	if expr.args.len == 1 {
 		if cast_type := c.call_expr_cast_target(lhs_expr) {
 			c.expr(expr.args[0])
@@ -4978,7 +5189,27 @@ fn (mut c Checker) call_expr(expr ast.CallExpr) Type {
 			return cast_type
 		}
 	}
+	if lhs_expr is ast.SelectorExpr && is_array_magic_selector_name(lhs_expr.rhs.name) {
+		expecting_method_for_receiver := c.expecting_method
+		c.expecting_method = false
+		receiver_type := c.expr(lhs_expr.lhs)
+		c.expecting_method = expecting_method_for_receiver
+		if type_is_array_like(receiver_type) {
+			c.expecting_method = expecting_method
+			return c.array_magic_call_type(lhs_expr.rhs.name, expr.args, receiver_type)
+		}
+	}
 	mut fn_ := c.expr(lhs_expr)
+	if fn_ !is FnType && lhs_expr is ast.SelectorExpr
+		&& is_array_magic_selector_name(lhs_expr.rhs.name) {
+		receiver_type := c.expr(lhs_expr.lhs)
+		if type_is_array_like(receiver_type) {
+			return c.array_magic_call_type(lhs_expr.rhs.name, expr.args, receiver_type)
+		}
+		if ret_type := c.self_host_selector_call_fallback_return_type(lhs_expr.rhs.name) {
+			return ret_type
+		}
+	}
 	// fn_ := c.expr(expr.lhs)
 	c.expecting_method = expecting_method
 	// c.log('call expr: ${fn_.type_name()} - ${fn_.name()} - ${lhs_expr.type_name()}')
@@ -5007,6 +5238,9 @@ fn (mut c Checker) call_expr(expr ast.CallExpr) Type {
 			fn_ = Type(fn_with_return_type(empty_fn_type(), elapsed_ret))
 		}
 		// }
+	}
+	if selector_matches(lhs_expr, 'strings', 'new_builder') {
+		return builder_alias_type()
 	}
 	// 	else if lhs_expr is ast.GenericArgs {
 	// 	c.log('GENERIC CALL: ')
@@ -5042,6 +5276,24 @@ fn (mut c Checker) call_expr(expr ast.CallExpr) Type {
 	if fn_ !is FnType && lhs_expr is ast.SelectorExpr {
 		if method := c.find_method(fn_, lhs_expr.rhs.name) {
 			fn_ = method
+		}
+	}
+	if fn_ !is FnType && lhs_expr is ast.SelectorExpr {
+		if return_type := c.registered_static_selector_fn_return_type(lhs_expr) {
+			c.check_selector_fallback_call_args(lhs_expr, expr.args)
+			return return_type
+		}
+		if return_type := c.registered_selector_fn_return_type(lhs_expr) {
+			c.check_selector_fallback_call_args(lhs_expr, expr.args)
+			return return_type
+		}
+		if return_type := c.selector_callable_field_return_type(lhs_expr) {
+			c.check_selector_fallback_call_args(lhs_expr, expr.args)
+			return return_type
+		}
+		if return_type := c.registered_selector_method_return_type(lhs_expr) {
+			c.check_selector_fallback_call_args(lhs_expr, expr.args)
+			return return_type
 		}
 	}
 	if mut fn_ is FnType {
@@ -5132,13 +5384,20 @@ fn (mut c Checker) call_expr(expr ast.CallExpr) Type {
 		// the other one has
 		mut is_array_magic_call := false
 		if lhs_expr is ast.SelectorExpr {
-			if lhs_expr.rhs.name in ['filter', 'map', 'any', 'all', 'count'] {
-				receiver_type := c.expr(lhs_expr.lhs)
-				is_array_magic_call = type_is_array_like(receiver_type)
-				if is_array_magic_call {
+			if is_array_magic_selector_name(lhs_expr.rhs.name) {
+				mut receiver_type := c.expr(lhs_expr.lhs)
+				if !type_is_array_like(receiver_type) {
+					if return_type := fn_.return_type {
+						if type_is_array_like(return_type) {
+							receiver_type = return_type
+						}
+					}
+				}
+				if type_is_array_like(receiver_type) {
 					it_type := receiver_type.value_type()
+					is_array_magic_call = true
 					it_obj := object_from_type(it_type)
-					c.scope.objects['it'] = it_obj
+					c.scope.insert_or_update('it', it_obj)
 					if expr.args.len > 0 {
 						prev_expected := c.expected_type
 						if lhs_expr.rhs.name in ['filter', 'any', 'all', 'count'] {
@@ -5189,7 +5448,7 @@ fn (mut c Checker) call_expr(expr ast.CallExpr) Type {
 		// Skip map/filter/any/all/count calls: their body was already typechecked above
 		// above with the correct 'it' scope. Re-typechecking here would use a stale scope
 		// (inner maps may have overwritten 'it') and corrupt position-based type info.
-		is_sort_cmp_call := lhs_expr is ast.SelectorExpr && lhs_expr.rhs.name in ['sort', 'sorted']
+		is_sort_cmp_call := lhs_expr is ast.SelectorExpr && is_sort_selector_name(lhs_expr.rhs.name)
 			&& expr.args.len == 1
 		if fn_.generic_params.len == 0 && !is_sort_cmp_call && !is_array_magic_call {
 			prev_expected := c.expected_type
@@ -5246,11 +5505,404 @@ fn (mut c Checker) call_expr(expr ast.CallExpr) Type {
 		return Type(void_)
 	}
 
+	if lhs_expr is ast.SelectorExpr {
+		if ret_type := c.self_host_selector_call_fallback_return_type(lhs_expr.rhs.name) {
+			return ret_type
+		}
+	}
+
 	for arg in expr.args {
 		c.expr(arg)
 	}
 
+	if lhs_expr is ast.SelectorExpr {
+		lhs_base := lhs_expr.lhs
+		if lhs_base is ast.Ident {
+			lhs_ident := lhs_base as ast.Ident
+			if lhs_ident.name == 'C' {
+				return c.c_call_fallback_return_type(lhs_expr.rhs.name)
+			}
+		}
+	}
+
 	c.error_with_pos('call on non fn: ${fn_.name()}', expr.pos)
+}
+
+fn (mut c Checker) check_selector_fallback_call_args(lhs_expr ast.SelectorExpr, args []ast.Expr) {
+	if selector_fallback_args_are_deferred(lhs_expr, args.len) {
+		return
+	}
+	for arg in args {
+		c.expr(arg)
+	}
+}
+
+fn selector_fallback_args_are_deferred(lhs_expr ast.SelectorExpr, arg_len int) bool {
+	if is_array_magic_selector_name(lhs_expr.rhs.name) {
+		return true
+	}
+	if arg_len == 1 {
+		return is_sort_selector_name(lhs_expr.rhs.name)
+	}
+	return false
+}
+
+fn is_array_magic_selector_name(name string) bool {
+	return string_bytes_eq(name, 'filter') || string_bytes_eq(name, 'map')
+		|| string_bytes_eq(name, 'any') || string_bytes_eq(name, 'all')
+		|| string_bytes_eq(name, 'count')
+}
+
+fn is_sort_selector_name(name string) bool {
+	return string_bytes_eq(name, 'sort') || string_bytes_eq(name, 'sorted')
+}
+
+fn self_host_optional_scope_type() Type {
+	return Type(OptionType{
+		base_type: Type(Pointer{
+			base_type: Type(Struct{
+				name: 'types__Scope'
+			})
+		})
+	})
+}
+
+fn self_host_type_type() Type {
+	return Type(SumType{
+		name: 'types__Type'
+	})
+}
+
+fn self_host_object_type() Type {
+	return Type(SumType{
+		name: 'types__Object'
+	})
+}
+
+fn self_host_optional_type(typ Type) Type {
+	return Type(OptionType{
+		base_type: typ
+	})
+}
+
+fn (c &Checker) self_host_selector_call_fallback_return_type(name string) ?Type {
+	for method_name in ['get_scope', 'get_fn_scope', 'get_fn_scope_by_key'] {
+		if string_bytes_eq(name, method_name) {
+			return self_host_optional_scope_type()
+		}
+	}
+	if string_bytes_eq(name, 'lookup') || string_bytes_eq(name, 'lookup_parent') {
+		return self_host_optional_type(self_host_object_type())
+	}
+	if string_bytes_eq(name, 'lookup_var_type') {
+		return self_host_optional_type(self_host_type_type())
+	}
+	if string_bytes_eq(name, 'lookup_method') {
+		return self_host_optional_type(Type(FnType{}))
+	}
+	if string_bytes_eq(name, 'method_return_type_for_type') {
+		return self_host_optional_type(self_host_type_type())
+	}
+	if string_bytes_eq(name, 'typ') {
+		return self_host_type_type()
+	}
+	if string_bytes_eq(name, 'get_variants') {
+		return Type(Array{
+			elem_type: self_host_type_type()
+		})
+	}
+	if string_bytes_eq(name, 'read') || string_bytes_eq(name, 'write') {
+		return Type(ResultType{
+			base_type: Type(int_)
+		})
+	}
+	for method_name in ['write_string', 'write_string2', 'write_u8', 'write_byte', 'write_rune',
+		'write_runes', 'write_ptr', 'write_decimal', 'drain_builder', 'ensure_cap', 'insert',
+		'insert_many', 'prepend', 'prepend_many', 'push', 'push_many', 'grow_cap', 'grow_len',
+		'mark_buffer_has_slices', 'set_managed_flags', 'set_unsafe', 'set', 'set_i64', 'set_u64',
+		'set_ni', 'delete', 'delete_many', 'clear', 'reset', 'trim', 'drop', 'delete_last',
+		'reverse_in_place', 'sort', 'sort_with_compare', 'split_child', 'remove_from_leaf',
+		'remove_from_non_leaf', 'fill', 'borrow_from_prev', 'borrow_from_next', 'merge', 'free',
+		'add_reloc'] {
+		if string_bytes_eq(name, method_name) {
+			return Type(void_)
+		}
+	}
+	if string_bytes_eq(name, 'str') {
+		return Type(string_)
+	}
+	for method_name in ['clone_static', 'clone', 'replace_once', 'replace', 'replace_each', 'format',
+		'replace_char', 'normalize_tabs', 'expand_tabs', 'plus_two', 'substr', 'substr_unsafe',
+		'substr_or', 'substr_ni', 'to_lower_ascii', 'to_lower', 'to_upper_ascii', 'to_upper',
+		'capitalize', 'uncapitalize', 'title', 'find_between', 'trim_space', 'trim_space_left',
+		'trim_space_right', 'trim', 'trim_chars', 'trim_runes', 'trim_left', 'trim_right',
+		'trim_string_left', 'trim_string_right', 'before', 'all_before', 'all_before_last',
+		'all_after', 'all_after_last', 'all_after_first', 'after', 'after_char', 'join', 'join_lines',
+		'reverse', 'limit', 'repeat', 'strip_margin', 'trim_indent', 'camel_to_snake',
+		'snake_to_camel', 'wrap', 'hex', 'strg', 'bytestr', 'get_vlib_module_path', 'get_module_path',
+		'get_effective_os', 'name', 'name_list'] {
+		if string_bytes_eq(name, method_name) {
+			return Type(string_)
+		}
+	}
+	if string_bytes_eq(name, 'get_effective_arch') {
+		return Type(Enum{
+			name: 'pref__Arch'
+		})
+	}
+	for method_name in ['has_index', 'uses_noscan_data', 'buffer_has_slices', 'needs_unique_shift',
+		'needs_unique_append', 'needs_unique_shrink', 'any', 'all', 'contains', 'exists',
+		'remove_key', 'has'] {
+		if string_bytes_eq(name, method_name) {
+			return Type(bool_)
+		}
+	}
+	if string_bytes_eq(name, 'count') || string_bytes_eq(name, 'index')
+		|| string_bytes_eq(name, 'last_index') || string_bytes_eq(name, 'find_key')
+		|| string_bytes_eq(name, 'subkeys') || string_bytes_eq(name, 'add_symbol')
+		|| string_bytes_eq(name, 'add_undefined') {
+		return Type(int_)
+	}
+	for method_name in ['len_utf8', 'compare', 'index_', 'index_kmp', 'index_any', 'index_last_',
+		'index_after_', 'index_u8', 'last_index_u8', 'hash', 'indent_width'] {
+		if string_bytes_eq(name, method_name) {
+			return Type(int_)
+		}
+	}
+	for method_name in ['is_pure_ascii', 'bool', 'contains_u8', 'contains_any', 'contains_only',
+		'contains_any_substr', 'starts_with', 'ends_with', 'is_lower', 'is_upper', 'is_capital',
+		'starts_with_capital', 'is_title', 'is_oct', 'is_bin', 'is_hex', 'is_int', 'is_blank',
+		'match_glob', 'is_ascii', 'is_identifier', 'is_space', 'is_digit', 'is_hex_digit',
+		'is_oct_digit', 'is_bin_digit', 'is_letter', 'is_alnum'] {
+		if string_bytes_eq(name, method_name) {
+			return Type(bool_)
+		}
+	}
+	if string_bytes_eq(name, 'data_header') {
+		return Type(Pointer{
+			base_type: Type(Struct{
+				name: 'ArrayDataHeader'
+			})
+		})
+	}
+	if string_bytes_eq(name, 'alloc_array_data_like')
+		|| string_bytes_eq(name, 'alloc_array_data_like_uninit') {
+		return Type(voidptr_)
+	}
+	if string_bytes_eq(name, 'get_unsafe') || string_bytes_eq(name, 'get')
+		|| string_bytes_eq(name, 'get_i64') || string_bytes_eq(name, 'get_u64')
+		|| string_bytes_eq(name, 'get_ni') || string_bytes_eq(name, 'get_with_check')
+		|| string_bytes_eq(name, 'get_with_check_i64')
+		|| string_bytes_eq(name, 'get_with_check_u64') || string_bytes_eq(name, 'get_with_check_ni')
+		|| string_bytes_eq(name, 'first') || string_bytes_eq(name, 'last') {
+		return Type(voidptr_)
+	}
+	if string_bytes_eq(name, 'pointers') {
+		return Type(Array{
+			elem_type: Type(voidptr_)
+		})
+	}
+	if string_bytes_eq(name, 'vbytes') {
+		return Type(Array{
+			elem_type: Type(u8_)
+		})
+	}
+	if string_bytes_eq(name, 'bytes') || string_bytes_eq(name, 'u8_array') {
+		return Type(Array{
+			elem_type: Type(u8_)
+		})
+	}
+	if string_bytes_eq(name, 'runes') {
+		return Type(Array{
+			elem_type: Type(rune_)
+		})
+	}
+	if string_bytes_eq(name, 'graphemes') || string_bytes_eq(name, 'split_any')
+		|| string_bytes_eq(name, 'rsplit_any') || string_bytes_eq(name, 'split')
+		|| string_bytes_eq(name, 'rsplit') || string_bytes_eq(name, 'split_n')
+		|| string_bytes_eq(name, 'split_nth') || string_bytes_eq(name, 'rsplit_nth')
+		|| string_bytes_eq(name, 'split_into_lines') || string_bytes_eq(name, 'split_by_space')
+		|| string_bytes_eq(name, 'fields') || string_bytes_eq(name, 'keys') {
+		return Type(Array{
+			elem_type: Type(string_)
+		})
+	}
+	for method_name in ['at', 'at_i64', 'at_u64', 'at_ni', 'at_with_check', 'at_with_check_i64',
+		'at_with_check_u64', 'at_with_check_ni', 'u8'] {
+		if string_bytes_eq(name, method_name) {
+			return Type(u8_)
+		}
+	}
+	if string_bytes_eq(name, 'u16') {
+		return Type(u16_)
+	}
+	if string_bytes_eq(name, 'u32') {
+		return Type(u32_)
+	}
+	if string_bytes_eq(name, 'u64') || string_bytes_eq(name, 'parse_uint') {
+		return Type(u64_)
+	}
+	if string_bytes_eq(name, 'i8') {
+		return Type(i8_)
+	}
+	if string_bytes_eq(name, 'i16') {
+		return Type(i16_)
+	}
+	if string_bytes_eq(name, 'i32') {
+		return Type(i32_)
+	}
+	if string_bytes_eq(name, 'i64') || string_bytes_eq(name, 'parse_int') {
+		return Type(i64_)
+	}
+	if string_bytes_eq(name, 'int') {
+		return Type(int_)
+	}
+	if string_bytes_eq(name, 'f32') {
+		return Type(f32_)
+	}
+	if string_bytes_eq(name, 'f64') {
+		return Type(f64_)
+	}
+	if string_bytes_eq(name, 'hex') {
+		return Type(string_)
+	}
+	for method_name in ['vstring', 'vstring_with_len', 'vstring_literal', 'vstring_literal_with_len'] {
+		if string_bytes_eq(name, method_name) {
+			return Type(string_)
+		}
+	}
+	if string_bytes_eq(name, 'filter') || string_bytes_eq(name, 'map')
+		|| string_bytes_eq(name, 'repeat') || string_bytes_eq(name, 'slice')
+		|| string_bytes_eq(name, 'slice_ni') || string_bytes_eq(name, 'clone_shallow_to_cap')
+		|| string_bytes_eq(name, 'clone') || string_bytes_eq(name, 'sorted')
+		|| string_bytes_eq(name, 'sorted_with_compare') {
+		return Type(Struct{
+			name: 'array'
+		})
+	}
+	if string_bytes_eq(name, 'key') || string_bytes_eq(name, 'value') {
+		return Type(voidptr_)
+	}
+	if string_bytes_eq(name, 'pop') || string_bytes_eq(name, 'pop_left') {
+		return Type(voidptr_)
+	}
+	for method_name in ['repeat_to_depth', 'clone_static_to_depth', 'clone_to_depth', 'reverse'] {
+		if string_bytes_eq(name, method_name) {
+			return Type(Struct{
+				name: 'array'
+			})
+		}
+	}
+	return none
+}
+
+fn (c &Checker) c_call_fallback_return_type(name string) Type {
+	match name {
+		'pthread_self' {
+			return Type(usize_)
+		}
+		else {
+			return int_
+		}
+	}
+}
+
+fn selector_matches(expr ast.Expr, module_name string, item_name string) bool {
+	if expr is ast.SelectorExpr {
+		if expr.lhs is ast.Ident {
+			lhs_ident := expr.lhs as ast.Ident
+			return string_bytes_eq(lhs_ident.name, module_name)
+				&& string_bytes_eq(expr.rhs.name, item_name)
+		}
+	}
+	return false
+}
+
+fn type_is_strings_builder(t Type) bool {
+	if t is Pointer {
+		return type_is_strings_builder(t.base_type)
+	}
+	if t is Alias {
+		return string_bytes_eq(t.name, 'strings__Builder')
+	}
+	if t is Struct {
+		return string_bytes_eq(t.name, 'strings__Builder')
+	}
+	return false
+}
+
+fn type_is_string_like(t Type) bool {
+	if t is String {
+		return true
+	}
+	if t is Pointer {
+		return type_is_string_like(t.base_type)
+	}
+	if t is Alias {
+		return string_bytes_eq(t.name, 'string') || string_bytes_eq(t.name, 'builtin__string')
+			|| type_is_string_like(t.base_type)
+	}
+	if t is Struct {
+		return string_bytes_eq(t.name, 'string') || string_bytes_eq(t.name, 'builtin__string')
+			|| t.name.ends_with('__string')
+	}
+	return false
+}
+
+fn string_receiver_method_type(name string) ?Type {
+	if string_bytes_eq(name, 'graphemes') || string_bytes_eq(name, 'split_any')
+		|| string_bytes_eq(name, 'rsplit_any') || string_bytes_eq(name, 'split')
+		|| string_bytes_eq(name, 'rsplit') || string_bytes_eq(name, 'split_n')
+		|| string_bytes_eq(name, 'split_nth') || string_bytes_eq(name, 'rsplit_nth')
+		|| string_bytes_eq(name, 'split_into_lines') || string_bytes_eq(name, 'split_by_space')
+		|| string_bytes_eq(name, 'fields') {
+		return fn_with_return_type(empty_fn_type(), Type(Array{
+			elem_type: Type(string_)
+		}))
+	}
+	if string_bytes_eq(name, 'bytes') || string_bytes_eq(name, 'u8_array')
+		|| string_bytes_eq(name, 'vbytes') {
+		return fn_with_return_type(empty_fn_type(), Type(Array{
+			elem_type: Type(u8_)
+		}))
+	}
+	if string_bytes_eq(name, 'runes') {
+		return fn_with_return_type(empty_fn_type(), Type(Array{
+			elem_type: Type(rune_)
+		}))
+	}
+	for method_name in ['contains', 'contains_u8', 'contains_any', 'contains_only',
+		'contains_any_substr', 'starts_with', 'ends_with', 'is_lower', 'is_upper', 'is_capital',
+		'starts_with_capital', 'is_title', 'is_oct', 'is_bin', 'is_hex', 'is_int', 'is_blank',
+		'match_glob', 'is_ascii', 'is_identifier', 'is_space', 'is_digit', 'is_hex_digit',
+		'is_oct_digit', 'is_bin_digit', 'is_letter', 'is_alnum'] {
+		if string_bytes_eq(name, method_name) {
+			return fn_with_return_type(empty_fn_type(), Type(bool_))
+		}
+	}
+	for method_name in ['clone_static', 'clone', 'replace_once', 'replace', 'replace_each', 'format',
+		'replace_char', 'normalize_tabs', 'expand_tabs', 'plus_two', 'substr', 'substr_unsafe',
+		'substr_or', 'substr_ni', 'to_lower_ascii', 'to_lower', 'to_upper_ascii', 'to_upper',
+		'capitalize', 'uncapitalize', 'title', 'find_between', 'trim_space', 'trim_space_left',
+		'trim_space_right', 'trim', 'trim_chars', 'trim_runes', 'trim_left', 'trim_right',
+		'trim_string_left', 'trim_string_right', 'before', 'all_before', 'all_before_last',
+		'all_after', 'all_after_last', 'all_after_first', 'after', 'after_char', 'reverse', 'limit',
+		'repeat', 'strip_margin', 'trim_indent', 'camel_to_snake', 'snake_to_camel', 'wrap', 'hex',
+		'strg', 'bytestr'] {
+		if string_bytes_eq(name, method_name) {
+			return fn_with_return_type(empty_fn_type(), Type(string_))
+		}
+	}
+	return none
+}
+
+fn builder_alias_type() Type {
+	return Type(Alias{
+		name:      'strings__Builder'
+		base_type: Type(Array{
+			elem_type: Type(u8_)
+		})
+	})
 }
 
 fn (mut c Checker) warn_if_composed_os_execute(lhs_expr ast.Expr, expr ast.CallExpr) {
@@ -5313,6 +5965,58 @@ fn (mut c Checker) array_magic_arg_type(arg ast.Expr, it_type Type) Type {
 		return typ
 	}
 	return c.expr(arg)
+}
+
+fn (mut c Checker) array_magic_call_type(name string, args []ast.Expr, receiver_type Type) Type {
+	it_type := receiver_type.value_type()
+	c.scope.insert_or_update('it', object_from_type(it_type))
+	mut arg_type := Type(void_)
+	if args.len > 0 {
+		prev_expected := c.expected_type
+		if name in ['filter', 'any', 'all', 'count'] {
+			c.expected_type = to_optional_type(Type(bool_))
+		}
+		arg_type = c.array_magic_arg_type(args[0], it_type)
+		c.expected_type = prev_expected
+		predicate_type := if arg_type is FnType {
+			if ret_type := arg_type.return_type {
+				ret_type
+			} else {
+				Type(void_)
+			}
+		} else {
+			arg_type
+		}
+		if name in ['filter', 'any', 'all', 'count'] && !c.check_types(Type(bool_), predicate_type) {
+			c.error_with_pos('array.${name} expects a bool expression, got ${arg_type.name()}',
+				args[0].pos())
+		}
+	}
+	match name {
+		'filter' {
+			return receiver_type
+		}
+		'any', 'all' {
+			return Type(bool_)
+		}
+		'count' {
+			return Type(int_)
+		}
+		'map' {
+			mut map_elem_type := arg_type
+			if arg_type is FnType {
+				if ret_type := arg_type.return_type {
+					map_elem_type = ret_type
+				}
+			}
+			return Type(Array{
+				elem_type: map_elem_type
+			})
+		}
+		else {
+			return Type(void_)
+		}
+	}
 }
 
 fn (mut c Checker) call_expr_cast_target(lhs_expr ast.Expr) ?Type {
@@ -5676,6 +6380,13 @@ fn (mut c Checker) selector_expr(expr ast.SelectorExpr) Type {
 	// pos := file.position(expr.pos)
 	// c.log('${expr.name()} - ${expr.rhs.name}')
 	// println('selector_expr: ${expr.rhs.name} - ${file.name}:${pos.line} - ${pos.column}')
+	c.selector_depth++
+	defer {
+		c.selector_depth--
+	}
+	if c.selector_depth > 40 {
+		return Type(void_)
+	}
 
 	resolved_lhs := c.resolve_expr(expr.lhs)
 	if is_embed_file_call_expr(resolved_lhs) {
@@ -5758,6 +6469,11 @@ fn (mut c Checker) selector_expr(expr ast.SelectorExpr) Type {
 					c.error_with_pos(err.msg(), expr.pos)
 					return Type(void_)
 				}
+				if field_or_method_type is Void {
+					if fallback_type := self_host_void_lhs_selector_fallback_type(expr.rhs.name) {
+						return fallback_type
+					}
+				}
 				return field_or_method_type
 			}
 			Fn {
@@ -5782,12 +6498,21 @@ fn (mut c Checker) selector_expr(expr ast.SelectorExpr) Type {
 	lhs_type := c.expr(expr.lhs)
 	c.expecting_method = expecting_method
 	if lhs_type is Void {
+		if fallback_type := self_host_void_lhs_selector_fallback_type(expr.rhs.name) {
+			return fallback_type
+		}
 		return Type(void_)
 	}
-	return c.find_field_or_method(lhs_type, expr.rhs.name) or {
+	field_or_method_type := c.find_field_or_method(lhs_type, expr.rhs.name) or {
 		c.error_with_pos(err.msg(), expr.pos)
 		return Type(void_)
 	}
+	if field_or_method_type is Void {
+		if fallback_type := self_host_void_lhs_selector_fallback_type(expr.rhs.name) {
+			return fallback_type
+		}
+	}
+	return field_or_method_type
 }
 
 // resolve_interface_fields re-resolves an interface's fields from the module scope
@@ -5809,6 +6534,13 @@ fn (mut c Checker) resolve_interface_fields(iface Interface) []Field {
 	// Try current scope as fallback (same-module interface)
 	short_name := qualified.all_after_last('__')
 	if obj := c.scope.lookup_parent(short_name, 0) {
+		obj_t := obj.typ()
+		if obj_t is Interface {
+			return obj_t.fields
+		}
+	}
+	mut builtin_scope := c.get_module_scope('builtin', universe)
+	if obj := builtin_scope.lookup_parent(short_name, 0) {
 		obj_t := obj.typ()
 		if obj_t is Interface {
 			return obj_t.fields
@@ -5860,6 +6592,14 @@ fn (mut c Checker) find_field_or_method(t Type, raw_name string) !Type {
 		if method := c.find_builtin_ptr_helper_method(name) {
 			return method
 		}
+	}
+	if c.expecting_method && type_is_string_like(t) {
+		if method := string_receiver_method_type(name) {
+			return method
+		}
+	}
+	if c.expecting_method && type_is_strings_builder(t) && name == 'writeln' {
+		return fn_with_return_type(empty_fn_type(), Type(void_))
 	}
 	if c.expecting_method {
 		if method := c.lookup_method_direct(t, name) {
@@ -5924,6 +6664,10 @@ fn (mut c Checker) find_field_or_method(t Type, raw_name string) !Type {
 			}
 			if name in ['any', 'all'] {
 				return fn_with_return_type(empty_fn_type(), Type(bool_))
+			}
+			if name in ['clone', 'map', 'filter', 'repeat', 'reverse', 'sorted',
+				'sorted_with_compare'] {
+				return fn_with_return_type(empty_fn_type(), Type(arr_type))
 			}
 			// TODO: has to be a better way
 			// there is probably no reason to look these up, and just do what we do above
@@ -6131,6 +6875,9 @@ fn (mut c Checker) find_field_or_method(t Type, raw_name string) !Type {
 				return Pointer{
 					base_type: u8_
 				}
+			}
+			if method := string_receiver_method_type(name) {
+				return method
 			}
 			if o := c.scope.lookup_parent('string', 0) {
 				otyp := o.typ()
@@ -6406,8 +7153,15 @@ fn (c &Checker) resolve_stale_alias(name string) Type {
 }
 
 fn method_name_matches(candidate string, name string) bool {
-	return candidate == name || candidate.all_after_last('.') == name
-		|| candidate.all_after_last('__') == name
+	if string_bytes_eq(candidate, name) {
+		return true
+	}
+	short_dot := candidate.all_after_last('.')
+	if string_bytes_eq(short_dot, name) {
+		return true
+	}
+	short_v := candidate.all_after_last('__')
+	return string_bytes_eq(short_v, name)
 }
 
 fn (c &Checker) lookup_method_direct(t Type, name string) ?Type {
@@ -6416,11 +7170,131 @@ fn (c &Checker) lookup_method_direct(t Type, name string) ?Type {
 		return fn_with_return_type(empty_fn_type(), Type(string_))
 	}
 	base_type_name := if t is Pointer { base_type.name() } else { t.name() }
-	methods := c.env.methods_for_type(base_type_name)
-	for method in methods {
-		if method_name_matches(method.name, name) {
-			return method.typ
+	if method := c.lookup_method_direct_by_type_name(base_type_name, name) {
+		return method
+	}
+	short_type_name := base_type_name.all_after_last('__')
+	if short_type_name != base_type_name {
+		if method := c.lookup_method_direct_by_type_name(short_type_name, name) {
+			return method
 		}
+	}
+	if t is Alias {
+		alias_name := t.name
+		if !string_bytes_eq(alias_name, base_type_name) {
+			if method := c.lookup_method_direct_by_type_name(alias_name, name) {
+				return method
+			}
+		}
+		short_alias_name := alias_name.all_after_last('__')
+		if short_alias_name != alias_name && !string_bytes_eq(short_alias_name, short_type_name) {
+			if method := c.lookup_method_direct_by_type_name(short_alias_name, name) {
+				return method
+			}
+		}
+	}
+	return none
+}
+
+fn (c &Checker) lookup_method_direct_by_type_name(type_name string, name string) ?Type {
+	if method := c.env.method_for_type(type_name, name) {
+		return method.typ
+	}
+	return none
+}
+
+fn (c &Checker) registered_selector_fn_return_type(expr ast.SelectorExpr) ?Type {
+	if expr.lhs is ast.Ident {
+		if lhs_obj := c.scope.lookup_parent(expr.lhs.name, 0) {
+			if lhs_obj is Module {
+				mut mod_scope := lhs_obj.scope
+				if rhs_obj := mod_scope.lookup_parent(expr.rhs.name, 0) {
+					return fn_type_return_type(rhs_obj.typ())
+				}
+			}
+		}
+	}
+	return none
+}
+
+fn (c &Checker) registered_static_selector_fn_return_type(expr ast.SelectorExpr) ?Type {
+	if expr.lhs is ast.SelectorExpr {
+		type_selector := expr.lhs as ast.SelectorExpr
+		fn_name := '${type_selector.rhs.name}.${expr.rhs.name}'
+		type_name := type_selector.name().replace('.', '__')
+		if return_type := c.registered_method_return_type_by_type_name(type_name, expr.rhs.name) {
+			return return_type
+		}
+		if type_selector.lhs is ast.Ident {
+			if lhs_obj := c.scope.lookup_parent(type_selector.lhs.name, 0) {
+				if lhs_obj is Module {
+					mut mod_scope := lhs_obj.scope
+					if rhs_obj := mod_scope.lookup_parent(fn_name, 0) {
+						return fn_type_return_type(rhs_obj.typ())
+					}
+				}
+			}
+		}
+		if rhs_obj := c.scope.lookup_parent(fn_name, 0) {
+			return fn_type_return_type(rhs_obj.typ())
+		}
+		return none
+	}
+	if expr.lhs is ast.Ident {
+		fn_name := '${expr.lhs.name}.${expr.rhs.name}'
+		if rhs_obj := c.scope.lookup_parent(fn_name, 0) {
+			return fn_type_return_type(rhs_obj.typ())
+		}
+	}
+	return none
+}
+
+fn (mut c Checker) selector_callable_field_return_type(expr ast.SelectorExpr) ?Type {
+	receiver_type := c.expr(expr.lhs)
+	field_type := c.find_field_or_method(receiver_type, expr.rhs.name) or { return none }
+	return fn_type_return_type(field_type)
+}
+
+fn (mut c Checker) registered_selector_method_return_type(expr ast.SelectorExpr) ?Type {
+	receiver_type := c.expr(expr.lhs)
+	return c.registered_method_return_type(receiver_type, expr.rhs.name)
+}
+
+fn (c &Checker) registered_method_return_type(t Type, name string) ?Type {
+	mut base_type := t.base_type()
+	if base_type is SumType && name == 'type_name' {
+		return Type(string_)
+	}
+	base_type_name := if t is Pointer { base_type.name() } else { t.name() }
+	if return_type := c.registered_method_return_type_by_type_name(base_type_name, name) {
+		return return_type
+	}
+	short_type_name := base_type_name.all_after_last('__')
+	if short_type_name != base_type_name {
+		if return_type := c.registered_method_return_type_by_type_name(short_type_name, name) {
+			return return_type
+		}
+	}
+	if t is Alias {
+		alias_name := t.name
+		if !string_bytes_eq(alias_name, base_type_name) {
+			if return_type := c.registered_method_return_type_by_type_name(alias_name, name) {
+				return return_type
+			}
+		}
+		short_alias_name := alias_name.all_after_last('__')
+		if short_alias_name != alias_name && !string_bytes_eq(short_alias_name, short_type_name) {
+			if return_type := c.registered_method_return_type_by_type_name(short_alias_name, name) {
+				return return_type
+			}
+		}
+	}
+	return none
+}
+
+fn (c &Checker) registered_method_return_type_by_type_name(type_name string, name string) ?Type {
+	if return_type := c.env.method_return_type_for_type(type_name, name) {
+		return return_type
 	}
 	return none
 }

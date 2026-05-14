@@ -268,6 +268,46 @@ fn test_interface_arg() {
 	assert has_used_key_containing(used, '|m|Impl|bar')
 }
 
+fn test_mark_used_tracks_generic_interface_call_arg_methods() {
+	used := mark_used_for_code_files_transformed({
+		'main.v': '
+module main
+
+interface Captures {
+	len() int
+	get(i int) ?int
+}
+
+struct TestCaptures {}
+
+fn (caps TestCaptures) len() int {
+	_ = caps
+	return 0
+}
+
+fn (caps TestCaptures) get(i int) ?int {
+	_ = caps
+	_ = i
+	return none
+}
+
+fn capture_match_or_panic(caps Captures, i int) int {
+	return caps.get(i) or { 0 }
+}
+
+fn use_caps[T](caps T) int {
+	return capture_match_or_panic(caps, 0)
+}
+
+fn test_use_caps() {
+	_ = use_caps(TestCaptures{})
+}
+'
+	})
+	assert has_used_key_containing(used, '|m|TestCaptures|len')
+	assert has_used_key_containing(used, '|m|TestCaptures|get')
+}
+
 fn test_mark_used_tracks_interface_arg_to_pointer_receiver_method() {
 	used := mark_used_for_code_files_transformed({
 		'searcher.v': '
@@ -760,6 +800,31 @@ fn test_mark_used_tracks_lifetime_generic_receiver_body_dependencies() {
 	assert used[test_key]
 	assert used[build_key]
 	assert used[default_key]
+}
+
+fn test_mark_used_tracks_struct_operator_overload_from_infix_expr() {
+	used := mark_used_for_code('
+struct Stats {
+	n int
+}
+
+fn (left Stats) + (right Stats) Stats {
+	return Stats{
+		n: left.n + right.n
+	}
+}
+
+fn test_stats_plus() {
+	left := Stats{
+		n: 1
+	}
+	right := Stats{
+		n: 2
+	}
+	_ = left + right
+}
+')
+	assert has_used_key_containing(used, 'main|m|Stats|+')
 }
 
 fn test_mark_used_keeps_all_functions_when_no_entry_root_exists() {
