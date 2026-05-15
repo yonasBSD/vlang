@@ -530,20 +530,41 @@ fn builder_linker_args(args []string) string {
 }
 
 fn builder_linker_args_with_cc(args []string, cc CC) string {
-	mut builder := new_test_builder(args)
-	builder.ccoptions.cc = cc
+	mut builder := new_test_builder_without_cc_setup(args)
+	ccompiler := ccompiler_name_for_test_cc(cc)
+	builder.pref.ccompiler = ccompiler
+	builder.pref.ccompiler_type = pref.cc_from_string(ccompiler)
+	builder.setup_ccompiler_options(ccompiler)
+	builder.setup_output_name()
 	return builder.get_linker_args().join(' ')
 }
 
 fn new_test_builder(args []string) Builder {
+	mut builder := new_test_builder_without_cc_setup(args)
+	builder.setup_ccompiler_options(builder.pref.ccompiler)
+	builder.setup_output_name()
+	return builder
+}
+
+fn new_test_builder_without_cc_setup(args []string) Builder {
 	mut full_args := ['']
 	full_args << args
 	prefs, _ := pref.parse_args_and_show_errors([], full_args, false)
 	mut builder := new_builder(prefs)
 	builder.out_name_c = os.join_path(os.vtmp_dir(), 'builder_cc_test.tmp.c')
-	builder.setup_ccompiler_options(prefs.ccompiler)
-	builder.setup_output_name()
 	return builder
+}
+
+fn ccompiler_name_for_test_cc(cc CC) string {
+	return match cc {
+		.tcc { 'tcc' }
+		.gcc { 'gcc' }
+		.icc { 'icc' }
+		.msvc { 'msvc' }
+		.clang { 'clang' }
+		.emcc { 'emcc' }
+		.unknown { '' }
+	}
 }
 
 fn new_builder_for_args(args []string) Builder {
