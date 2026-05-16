@@ -2169,15 +2169,7 @@ fn (mut c Checker) comptime_if_cond(mut cond ast.Expr, mut sb strings.Builder) (
 				return false, false
 			}
 			if ifdef := ast.comptime_if_to_ifdef(cname, c.pref) {
-				if cname == 'tinyc' {
-					// `__TINYC__` can be force-defined for ABI compatibility
-					// (e.g. mbedtls precompiled .o files). Exclude clang/gcc so
-					// that tcc-only intrinsics (tcc_backtrace, inline asm) are
-					// not emitted when the fallback compiler is clang/gcc.
-					sb.write_string('(defined(__TINYC__) && !defined(__clang__) && !defined(__GNUC__))')
-				} else {
-					sb.write_string('defined(${ifdef})')
-				}
+				sb.write_string('defined(${ifdef})')
 			} else {
 				sb.write_string('${is_true}')
 			}
