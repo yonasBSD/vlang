@@ -1174,7 +1174,7 @@ pub fn (mut g Gen) init() {
 			g.cheaders.writeln('#include <stddef.h>')
 		} else {
 			tcc_undef_has_include := '
-#if defined(__TINYC__) && defined(__has_include) // tcc does not support has_include properly yet, turn it off completely
+#if defined(__TINYC__) && !defined(__clang__) && !defined(__GNUC__) && defined(__has_include) // tcc does not support has_include properly yet, turn it off completely
 #undef __has_include
 #endif'
 			g.preincludes.writeln(tcc_undef_has_include)

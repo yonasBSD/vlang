@@ -162,7 +162,7 @@ const c_common_macros = '
 	}
 	#endif
 #endif
-#ifdef __TINYC__
+#if defined(__TINYC__) && !defined(__clang__) && !defined(__GNUC__)
 	#define _Atomic volatile
 	#undef E_STRUCT_DECL
 	#undef E_STRUCT
@@ -227,7 +227,7 @@ const c_common_macros = '
 #else
 	#define _MOV
 #endif
-#if defined(__TINYC__) && defined(__has_include) // tcc does not support has_include properly yet, turn it off completely
+#if defined(__TINYC__) && !defined(__clang__) && !defined(__GNUC__) && defined(__has_include) // tcc does not support has_include properly yet, turn it off completely
 #undef __has_include
 #endif
 //likely and unlikely macros
