@@ -7,7 +7,7 @@
 
 #ifndef __cplusplus
 // If C just use stdatomic.h
-#if !defined(__TINYC__) || defined(__clang__) || defined(__GNUC__)
+#ifndef __TINYC__
 #include <stdatomic.h>
 #endif
 #else
@@ -19,7 +19,7 @@
     /* x86 architecture: uses PAUSE instruction for efficient spinning */
     #define cpu_relax() __asm__ __volatile__ ("pause")
 #elif defined(__aarch64__) || defined(_M_ARM64) || defined(__arm__) || defined(_M_ARM)
-    #if defined(__TINYC__) && !defined(__clang__) && !defined(__GNUC__)
+    #ifdef __TINYC__
         /* TCC compiler limitation: assembly not supported on ARM */
         #define cpu_relax()
     #else
@@ -45,7 +45,7 @@
         ::: "memory") /* Memory clobber to prevent instruction reordering */
 #endif
 
-#if defined(__TINYC__) && !defined(__clang__) && !defined(__GNUC__)
+#ifdef __TINYC__
 
 typedef volatile long long atomic_llong;
 typedef volatile unsigned long long atomic_ullong;
